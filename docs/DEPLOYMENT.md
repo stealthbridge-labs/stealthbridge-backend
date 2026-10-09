@@ -47,3 +47,13 @@ Alert when `/ready` stays degraded, the observed ledger age exceeds 180 seconds,
 To connect an engineering staging frontend, set the `STEALTHBRIDGE_API_URL` on a **separate Vercel preview project** pointing to the actual backend HTTPS URL, with `STEALTHBRIDGE_SITE_MODE=preview`. Keep the production marketing site on `landing`.
 
 **Deploying the API cannot enable payments or contract transactions.** The `POST /v1/settlements` handler remains disabled.
+
+## Post-deployment acceptance gate
+
+From CI or an operator-approved staging environment, run:
+
+```sh
+python3 scripts/smoke_testnet_http.py --url "https://your-staging-backend.example"
+```
+
+The script fails on non-JSON responses, wrong Testnet metadata, accidentally enabled capabilities, unexpected RPC errors, unverified contract deployment or a settlement write that is not disabled. A 502 from network or a 503 degraded readiness result is accepted only when a structured dependency failure explains the outage; do not interpret these as a successful ledger observation. Run on every approved staging deployment, and after configuring the actual deployed API URL, not against a mocked production endpoint. CI does not require staging credentials or automatically deploy. Do not run smoke probes against a URL containing a token.
