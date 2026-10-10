@@ -19,6 +19,29 @@ const TESTNET_PASSPHRASE: &str = "Test SDF Network ; September 2015";
 const MAX_RPC_BODY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_IN_FLIGHT_RPC: usize = 16;
 
+/// Refuse accidental plaintext PostgreSQL credentials over remote networks.
+/// Loopback Postgres remains available for isolated local CI and development.
+fn validate_database_transport(database_url: &str) -> Result<(), Box<dyn Error>> {
+    let url = reqwest::Url::parse(database_url)
+        .map_err(|_| "DATABASE_URL must be a valid PostgreSQL URL")?;
+    if !["postgres", "postgresql"].contains(&url.scheme())
+        || url.username().is_empty() || url.password().is_none()
+    {
+        return Err("DATABASE_URL must be a PostgreSQL connection URL with credentials".into());
+    }
+    let host = url.host_str().ok_or("DATABASE_URL must include a database host")?;
+    let local = ["localhost", "127.0.0.1", "[::1]", "::1"].contains(&host);
+    if !local {
+        let modes: Vec<String> = url.query_pairs()
+            .filter(|(key, _)| key == "sslmode")
+            .map(|(_, value)| value.into_owned()).collect();
+        if modes.len() != 1 || !["require", "verify-ca", "verify-full"].contains(&modes[0].as_str()) {
+            return Err("Remote PostgreSQL requires exactly one secure sslmode".into());
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct AppState {
     http: Client,
@@ -60,6 +83,7 @@ impl AppState {
                 // Do not automatically apply migrations in the application process.
                 // Keep liveness independent from database reachability; /ready
                 // reports failed connections with a bounded query timeout.
+                validate_database_transport(&database_url)?;
                 Some(PgPoolOptions::new()
                     // Vercel may start multiple function instances: bound each pool to
                     // avoid exhausting a managed PostgreSQL connection budget.
@@ -512,6 +536,22 @@ pub fn router(state: AppState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn remote_postgres_requires_tls_and_local_ci_remains_supported() {
+        assert!(validate_database_transport("postgres://ci:ci@localhost:5432/ci").is_ok());
+        assert!(validate_database_transport("postgresql://ci:ci@127.0.0.1/ci").is_ok());
+        assert!(validate_database_transport("postgresql://user:pass@db.example/neondb?channel_binding=require&sslmode=require").is_ok());
+        assert!(validate_database_transport("postgresql://user:pass@db.example/neondb?sslmode=verify-full").is_ok());
+        for rejected in [
+            "postgresql://user:pass@db.example/neondb",
+            "postgresql://user:pass@db.example/neondb?sslmode=disable",
+            "postgresql://user:pass@db.example/neondb?sslmode=prefer",
+            "postgresql://user:pass@db.example/neondb?sslmode=require&sslmode=disable",
+            "http://user:pass@db.example/neondb?sslmode=require",
+        ] {
+            assert!(validate_database_transport(rejected).is_err());
+        }
+    }
     #[test]
     fn readiness_distinguishes_missing_and_unavailable_database_states(){
         let missing=readiness_projection(true,false,false);
