@@ -60,14 +60,6 @@
             "String"
           ],
           "returns": "bool"
-        },
-        "is_effective_commitment": {
-          "args": [
-            "String",
-            "u32",
-            "BytesN<32>"
-          ],
-          "returns": "bool"
         }
       },
       "writes": [
@@ -99,21 +91,6 @@
             "String"
           ],
           "returns": "bool"
-        },
-        "public_flags_allow_commitment": {
-          "args": [
-            "String",
-            "String",
-            "u32",
-            "BytesN<32>"
-          ],
-          "returns": "bool"
-        },
-        "check_commitment_batch": {
-          "args": [
-            "Vec<GovernanceCheck>"
-          ],
-          "returns": "Result<Vec<bool>,GateError>"
         }
       },
       "writes": []
