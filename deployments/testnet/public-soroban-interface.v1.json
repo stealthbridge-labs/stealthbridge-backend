@@ -69,6 +69,31 @@
         "set_paused",
         "set_rule"
       ]
+    },
+    "governance-gate": {
+      "source": "contracts/governance-gate/src/lib.rs",
+      "reads": {
+        "get_admin": {
+          "args": [],
+          "returns": "Option<Address>"
+        },
+        "corridor_registry": {
+          "args": [],
+          "returns": "Option<Address>"
+        },
+        "policy_registry": {
+          "args": [],
+          "returns": "Option<Address>"
+        },
+        "public_flags_allow": {
+          "args": [
+            "String",
+            "String"
+          ],
+          "returns": "bool"
+        }
+      },
+      "writes": []
     }
   }
 }
