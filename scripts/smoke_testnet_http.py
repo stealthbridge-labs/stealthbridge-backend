@@ -3,6 +3,7 @@
 import argparse
 import json
 import sys
+import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -27,7 +28,7 @@ def error_is(body, allowed):
     error = body.get("error")
     return isinstance(error, dict) and error.get("code") in allowed and isinstance(body.get("trace_id"), str)
 
-def verify(origin):
+def verify(origin, require_live_network=False, max_ledger_age_seconds=180):
     status, health = probe(origin, "/health")
     assert status == 200 and health.get("status") == "ok", "liveness failed"
     status, cap = probe(origin, "/v1/capabilities")
@@ -52,8 +53,18 @@ def verify(origin):
         assert network.get("passphrase") == "Test SDF Network ; September 2015"
         assert isinstance(network.get("ledger_sequence"), int) and network["ledger_sequence"] > 0
         assert isinstance(network.get("ledger_hash"), str) and len(network["ledger_hash"]) == 64
+        assert all(c in "0123456789abcdefABCDEF" for c in network["ledger_hash"]), "ledger hash must be hexadecimal"
+        assert isinstance(network.get("protocol_version"), int) and network["protocol_version"] > 0
+        closed = network.get("ledger_closed_at_unix")
+        assert isinstance(closed, str) and closed.isdecimal(), "ledger close time invalid"
+        age = time.time() - int(closed)
+        assert -60 <= age <= max_ledger_age_seconds, f"stale or future Testnet ledger ({age:.0f}s)"
+        print(f"PASS: live Testnet ledger {network['ledger_sequence']} ({age:.0f}s old)")
     else:
         assert status == 502 and error_is(network, {"UPSTREAM_UNAVAILABLE"}), "network RPC failure not classified"
+        if require_live_network:
+            raise AssertionError("live Testnet RPC is required; degraded network is not deployment-ready")
+        print("DEGRADED: Stellar RPC unavailable; live ledger not observed")
     status, write = probe(origin, "/v1/settlements", method="POST")
     assert status == 501 and error_is(write, {"FEATURE_DISABLED"}), "settlement write unexpectedly enabled"
     status, invalid = probe(origin, "/v1/transactions/not-a-hash")
@@ -63,12 +74,16 @@ def verify(origin):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", required=True, help="Deployed HTTPS staging API origin")
+    parser.add_argument("--require-live-network", action="store_true", help="Require a fresh Stellar Testnet ledger")
+    parser.add_argument("--max-ledger-age-seconds", type=int, default=180, help="Max observed ledger age in seconds")
     args = parser.parse_args()
+    if not 1 <= args.max_ledger_age_seconds <= 3600:
+        parser.error("--max-ledger-age-seconds must be between 1 and 3600")
     origin = args.url.rstrip("/")
     if not origin.startswith("https://") or "/" in origin[8:]:
         parser.error("Only HTTPS staging API origins (without a path) are accepted")
     try:
-        verify(origin)
+        verify(origin, args.require_live_network, args.max_ledger_age_seconds)
     except (AssertionError, URLError, ValueError, TimeoutError) as error:
         print(f"FAIL: {error}", file=sys.stderr)
         sys.exit(1)
