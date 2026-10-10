@@ -102,3 +102,27 @@ The internal HMAC verifier and tenant-scoped PostgreSQL inbox now reject unauthe
 ## Real HTTP contract integration regression
 
 `tests/contracts_http_integration.rs` now starts the actual Axum router on an ephemeral local port. It verifies `GET /v1/contracts` exposes the canonical empty Testnet deployment manifest and source-level read-method inventory; `POST /v1/settlements` stays HTTP 501; and payment/privacy capability flags remain false. No Stellar RPC calls, real payment data, private witnesses or on-chain deployments are part of this test.
+
+
+## Wallet public-account trust boundary
+
+The backend now provides `wallet::decode_account_address`, a pure Rust
+validator for **classic Stellar `G...` StrKeys** with a version byte and
+CRC16-XModem checksum. It returns an Ed25519 public-key byte array but **does
+not prove ownership**. The corresponding frontend and SDK validators enforce
+the same checksum for local watch-only inputs.
+
+StealthBridge does not offer a public endpoint for registering or authenticating
+wallet addresses, and the preview never uploads watched addresses to the
+backend. A Freighter connection exposes a public key to the browser only after
+the user grants access; it is neither an organization login nor a transaction
+signature. Any future authenticated write path must verify a challenge signature,
+bind the authenticated account to an active organization role, enforce replay
+protection and confirm the exact Testnet passphrase.
+
+Soroban governance writes remain authorized on-chain by `require_auth()` in
+the registry contracts; nothing in this Rust utility signs or submits them.
+Current `POST /v1/settlements` remains disabled. A verified contract deployment,
+working privacy rail, and compliance/audit gates are required before new
+financial APIs can be enabled.
+
