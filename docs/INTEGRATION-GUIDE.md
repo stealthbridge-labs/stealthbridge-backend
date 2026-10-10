@@ -126,3 +126,28 @@ Current `POST /v1/settlements` remains disabled. A verified contract deployment,
 working privacy rail, and compliance/audit gates are required before new
 financial APIs can be enabled.
 
+
+
+## Soroban cross-registry governance gate (source-only)
+
+The canonical `GET /v1/contracts` interface now lists three pinned Soroban
+source contracts: corridor registry, policy registry and the read-only
+governance gate. The new gate's
+`public_flags_allow(corridor: String, policy: String) -> bool` uses
+Soroban cross-contract reads of both registries, returning false for paused,
+missing or incompatible downstream contracts.
+
+This **does not** establish a deployed contract instance: the production
+manifest still reports `status=not-deployed`,
+`on_chain_verified=false` and `payment_execution_enabled=false`. The
+backend does not invoke a claimed contract ID, accept wallet addresses
+as identity proof or permit settlement writes. Its CI pins an exact
+contracts-repository commit and verifies the corresponding source-only
+method inventory; frontends and SDKs reject contrary payment claims.
+
+Before any on-chain cross-registry invocation is exposed, verify all three
+actual deployed bytecode hashes, constructor-bound dependency addresses,
+network passphrase, contract admin authorization and an independently
+audited manifest. A true public governance result remains insufficient
+for privacy proofs, token movement, banking or fiat payouts.
+
