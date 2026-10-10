@@ -6,3 +6,4 @@ pub mod amount;
 pub mod ledger;
 pub mod authz;
 pub mod webhook;
+pub mod wallet;
