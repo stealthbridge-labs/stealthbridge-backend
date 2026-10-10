@@ -60,7 +60,14 @@ impl AppState {
                 // Do not automatically apply migrations in the application process.
                 // Keep liveness independent from database reachability; /ready
                 // reports failed connections with a bounded query timeout.
-                Some(PgPoolOptions::new().max_connections(10).connect_lazy(&database_url)?)
+                Some(PgPoolOptions::new()
+                    // Vercel may start multiple function instances: bound each pool to
+                    // avoid exhausting a managed PostgreSQL connection budget.
+                    .min_connections(0)
+                    .max_connections(2)
+                    .acquire_timeout(Duration::from_secs(3))
+                    .idle_timeout(Duration::from_secs(60))
+                    .connect_lazy(&database_url)?)
             }
             _ => None,
         };
