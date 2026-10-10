@@ -29,6 +29,8 @@ jobs:
       - run: cargo fmt --all
       - run: cargo test --all-targets
       - run: cargo clippy --all-targets -- -D warnings
+      - name: Test live-ledger freshness and safe degraded behavior
+        run: python3 -m unittest scripts/test_smoke_testnet_http.py
       - name: Verify deployment snapshot matches pinned undeployed contracts source
         env:
           STEALTHBRIDGE_CONTRACTS_REF: 84b86fbb6ce595d7dad47b01bb88061e56ca8952
