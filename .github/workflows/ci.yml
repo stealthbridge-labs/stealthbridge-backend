@@ -33,5 +33,5 @@ jobs:
         run: python3 -m unittest scripts/test_smoke_testnet_http.py
       - name: Verify deployment snapshot matches pinned undeployed contracts source
         env:
-          STEALTHBRIDGE_CONTRACTS_REF: 84b86fbb6ce595d7dad47b01bb88061e56ca8952
+          STEALTHBRIDGE_CONTRACTS_REF: b096c86116ef40cd03c96557f0347673ed034348
         run: python3 scripts/verify_manifest.py
