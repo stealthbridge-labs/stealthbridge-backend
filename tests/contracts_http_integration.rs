@@ -27,6 +27,13 @@ async fn real_contract_discovery_http_remains_undeployed_and_non_moving(){
         .as_object().expect("real source method metadata");
     assert!(methods.contains_key("is_effective"));
     assert!(!methods.contains_key("set_rule"));
+    let gate=&body["public_interface"]["contracts"]["governance-gate"];
+    assert_eq!(gate["source"],"contracts/governance-gate/src/lib.rs");
+    assert_eq!(gate["reads"]["public_flags_allow"]["returns"],"bool");
+    assert_eq!(gate["reads"]["public_flags_allow"]["args"].as_array().unwrap().len(),2);
+    assert_eq!(gate["writes"].as_array().unwrap().len(),0);
+    // This source inventory never certifies an on-chain gate deployment.
+    assert!(body["manifest"]["contractAddresses"]["governance-gate"].is_null());
     let access=client.post(format!("{base}/v1/settlements"))
        .send().await.expect("disabled write request");
     assert_eq!(access.status(),reqwest::StatusCode::NOT_IMPLEMENTED);
