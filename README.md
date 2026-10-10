@@ -4,6 +4,31 @@
 
 **Engineering roadmap:** [View the repository-specific plan](ROADMAP.md).
 
+## End-to-end platform architecture and delivery priorities
+
+**Full engineering guide:** [Backend architecture, managed PostgreSQL, trust boundaries and delivery gates](docs/ARCHITECTURE-AND-DELIVERY.md).
+
+```text
+Next.js preview / typed SDK
+      │ read-only HTTP + explicit typed errors
+      ▼
+Rust/Axum Testnet API ───► Stellar RPC (network identity, ledger, tx status)
+      │
+      ├──► Neon PostgreSQL (organizations, corridors, journal, checkpoints)
+      ├──► source-only Soroban ABI + not-deployed manifest
+      └──x financial execution (returns disabled)
+Future: authenticated sessions → signed approval → verified privacy rail
+      → actual on-chain finality → independent provider payout → reconciliation
+```
+
+**Implemented vs operational:** real SQLx migrations have been applied to managed Neon; code queries real enabled-corridor rows, and the CLI records new candidate corridors as **disabled**. Runtime reachability, credentials and production recovery must still be independently verified after deployments. A `GET /ready` response is infrastructure readiness only; even `200` must still report `payments=disabled`. The journal, exact-value arithmetic, role helpers and webhook protections are internal foundations, **not** authenticated public fund-moving services.
+
+**Next engineering milestones:** preserve evidence of a fresh Testnet RPC + Neon staging acceptance; establish a designated always-on observer rather than polling on every Vercel function; introduce challenge-based wallet authentication with short-lived nonce, origin/network binding and revocation; enforce tenant roles in database transactions; and consume independently attested three-contract addresses only after on-chain review.
+
+**Later gates:** signed expiring quote and exact asset identity; workflow drafts and distinct approvals; durable outbox/inbox and idempotent provider callbacks; verified Confidential Tokens or Stellar Private Payments adapters; audited wallet/chain execution; reconciliation of chain finality with partner payout; observability and recovery drills. A payout-provider callback can never be inferred from a chain transaction hash.
+
+**Security constraints:** all off-chain provider secrets remain server-side; remote PostgreSQL requires secure `sslmode`; bounded requests and sanitized logs; no fabricated FX, partners, customer records or liquidity. The canonical testnet contract manifest stays `not-deployed` until independent evidence and a reviewed manifest revision exist. Never enable `POST /v1/settlements` just because the database and RPC work.
+
 Real-time, **read-only** Stellar Testnet observation API, a real transaction hash lookup, a tenant-scoped internal settlement journal, and an unseeded operator-managed corridor catalog. Rust, Axum, PostgreSQL, Stellar RPC.
 
 **Live data, not demo records.** `GET /v1/network` makes actual `getNetwork` and `getLatestLedger` RPC requests. `GET /v1/corridors` reads enabled corridors from PostgreSQL; if no database is configured it clearly returns 503 instead of making them up. `POST /v1/settlements` is disabled (501) until cryptographic proof and custody requirements are satisfied.
