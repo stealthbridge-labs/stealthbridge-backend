@@ -4,6 +4,25 @@
 
 **Cross-repository contract:** [Frontend](https://github.com/stealthbridge-labs/stealthbridge-frontend/blob/main/ROADMAP.md) · [Backend](https://github.com/stealthbridge-labs/stealthbridge-backend/blob/main/ROADMAP.md) · [Contracts](https://github.com/stealthbridge-labs/stealthbridge-contracts/blob/main/ROADMAP.md) · [SDK](https://github.com/stealthbridge-labs/stealthbridge-sdk/blob/main/ROADMAP.md)
 
+## October 2026 implementation checkpoint and next delivery slices
+
+See [architecture and delivery](docs/ARCHITECTURE-AND-DELIVERY.md) for a full Rust/Axum ↔ Neon ↔ Stellar ↔ SDK/frontend boundary map.
+
+**Verified code/CI baseline:** Stellar Testnet RPC reader and freshness-aware `/ready`; managed PostgreSQL migrations; disabled candidate corridor onboarding and enabled-only reads; bounded public transaction observation; internal tenant-scoped journal, role helpers and webhook primitives; source-only three-contract ABI and `not-deployed` manifest. Remote PostgreSQL requires explicit TLS. These are not a live financial service.
+
+**Priority sequence (with evidence gates):**
+
+| Order | Owner deliverable | Evidence required |
+| --- | --- | --- |
+| B1 | Deployment runtime acceptance and operational Postgres posture | Actual fresh ledger and `SELECT 1` over HTTPS `/ready`, schema verification, monitoring, restore plan |
+| B2 | Continuous dedicated ledger observer / recovery | Checkpoint monotonicity, stale RPC, failover, worker lifecycle and duplicate handling |
+| B3 | Signed wallet challenge and tenant authorization | Nonce replay, origin/network binding, role revocation and cross-tenant negative tests |
+| B4 | Attested Testnet governance read adapter | Real C-address/WASM/admin/dependency attestation, contract protocol compatibility |
+| B5 | Real approved quote + settlement orchestration | Operator-verified partner sandbox, distinct approval, idempotency, payout callback signature, reconciliation and failure drills |
+| B6 | Approved value-moving Testnet rail | Independent privacy/security/compliance verification; narrow rollout and rollback before any Mainnet consideration |
+
+**No shortcuts:** a database row, `200 /ready`, wallet G-address or `public_flags_allow=true` is **not** a payment authorization. The public settlement POST must stay disabled until there is actual independently verified cryptographic signing and policy enforcement.
+
 ## Platform mission
 
 Implement a reliable, multi-tenant Rust/Axum orchestration layer connecting verified Stellar privacy primitives with appropriately licensed liquidity and fiat partners. The backend is **not** a ZK wallet or a substitute for financial regulation. It owns durable workflow state, authenticated policy decisions, ledger observations, provider adapters and settlement reconciliation. Money movement cannot be enabled merely by exposing a submit API.
