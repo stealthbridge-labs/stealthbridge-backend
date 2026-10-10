@@ -15,13 +15,11 @@ async fn pages_are_ordered_bounded_and_never_invent_provider_data() {
     // even if an operator bypasses the application and directly executes SQL.
     let bad_asset = Uuid::new_v4();
     assert!(sqlx::query(
-        "INSERT INTO corridors (id,origin_country,destination_country,asset_code,privacy_rail) \\
-         VALUES ($1,'NG','GH','BAD ASSET','confidential-token')"
+        "INSERT INTO corridors (id,origin_country,destination_country,asset_code,privacy_rail) VALUES ($1,'NG','GH','BAD ASSET','confidential-token')"
     ).bind(bad_asset).execute(&pool).await.is_err());
     let bad_issuer = Uuid::new_v4();
     assert!(sqlx::query(
-        "INSERT INTO corridors (id,origin_country,destination_country,asset_code,asset_issuer,privacy_rail) \\
-         VALUES ($1,'NG','GH','USDC','','confidential-token')"
+        "INSERT INTO corridors (id,origin_country,destination_country,asset_code,asset_issuer,privacy_rail) VALUES ($1,'NG','GH','USDC','','confidential-token')"
     ).bind(bad_issuer).execute(&pool).await.is_err());
 
 
