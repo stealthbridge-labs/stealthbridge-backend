@@ -42,6 +42,14 @@ fn validate_database_transport(database_url: &str) -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
+/// Outbound RPC requests must never follow redirects: the configured
+/// provider is the only permitted upstream, and its path may contain a key.
+fn rpc_http_client() -> Result<Client, reqwest::Error> {
+    Client::builder()
+        .timeout(Duration::from_secs(8))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+}
 #[derive(Clone)]
 pub struct AppState {
     http: Client,
@@ -77,7 +85,7 @@ impl AppState {
             || url.query().is_some() || url.fragment().is_some() {
             return Err("STELLAR_RPC_URL must be HTTPS with no credentials, query or fragment".into());
         }
-        let http = Client::builder().timeout(Duration::from_secs(8)).build()?;
+        let http = rpc_http_client()?;
         let db = match env::var("DATABASE_URL") {
             Ok(database_url) if !database_url.is_empty() => {
                 // Do not automatically apply migrations in the application process.
@@ -103,7 +111,7 @@ impl AppState {
     #[cfg(test)]
     pub fn without_db() -> Self {
         Self {
-            http: Client::new(),
+            http: rpc_http_client().expect("create bounded no-redirect Testnet HTTP client"),
             rpc_url: "https://soroban-testnet.stellar.org".to_owned(),
             db: None,
             rpc_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT_RPC)),
