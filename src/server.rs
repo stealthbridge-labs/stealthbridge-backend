@@ -709,6 +709,20 @@ mod tests {
             assert!(validate_database_transport(rejected).is_err());
         }
     }
+    #[tokio::test]
+    async fn postgres_readiness_checks_migration_markers_and_core_relations() {
+        let url = env::var("DATABASE_URL").expect("isolated CI PostgreSQL DATABASE_URL");
+        let pool = PgPool::connect(&url).await.expect("connect isolated CI database");
+        sqlx::migrate!("./migrations").run(&pool).await.expect("apply test schema");
+        assert!(database_schema_ready(&pool).await);
+        let completed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM _sqlx_migrations WHERE success=TRUE AND version = ANY($1::bigint[])",
+        )
+        .bind(REQUIRED_SCHEMA_VERSIONS.as_slice())
+        .fetch_one(&pool).await.expect("migration count");
+        assert_eq!(completed, REQUIRED_SCHEMA_VERSIONS.len() as i64);
+        pool.close().await;
+    }
     #[test]
     fn readiness_distinguishes_missing_and_unavailable_database_states(){
         let missing=readiness_projection(true,false,false);
