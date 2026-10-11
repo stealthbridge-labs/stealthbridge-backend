@@ -698,6 +698,36 @@ mod tests {
         handle.abort();
     }
     #[test]
+    fn public_corridors_reject_database_rows_that_bypass_operator_validation() {
+        let mut row = Corridor {
+            id: Uuid::nil(),
+            origin_country: "NG".into(),
+            destination_country: "GH".into(),
+            asset_code: "USDC".into(),
+            asset_issuer: None,
+            privacy_rail: "confidential-token".into(),
+        };
+        assert!(row.safe_public_record());
+        row.asset_issuer = Some(
+            "GAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB7JZX".into()
+        );
+        assert!(row.safe_public_record());
+        row.asset_issuer = Some(format!("G{}", "A".repeat(55)));
+        assert!(!row.safe_public_record());
+        row.asset_issuer = None;
+        row.destination_country = "NG".into();
+        assert!(!row.safe_public_record());
+        row.destination_country = "GH".into();
+        row.origin_country = "ng".into();
+        assert!(!row.safe_public_record());
+        row.origin_country = "NG".into();
+        row.privacy_rail = "fiat-payout".into();
+        assert!(!row.safe_public_record());
+        row.privacy_rail = "private-payments".into();
+        row.asset_code = "US DC".into();
+        assert!(!row.safe_public_record());
+    }
+    #[test]
     fn corridor_metadata_filters_reject_bad_inputs_before_database_io() {
         let mut params = CorridorPageParams {
             after: None,
