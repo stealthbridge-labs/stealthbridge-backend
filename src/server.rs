@@ -230,6 +230,23 @@ pub struct Corridor {
     privacy_rail: String,
 }
 
+impl Corridor {
+    /// Database CHECK constraints are a first defense. Validate again at
+    /// the public API boundary in case an operator bypassed the CLI.
+    fn safe_public_record(&self) -> bool {
+        let country = |value: &str| value.len() == 2
+            && value.bytes().all(|b| b.is_ascii_uppercase());
+        country(&self.origin_country)
+            && country(&self.destination_country)
+            && self.origin_country != self.destination_country
+            && !self.asset_code.is_empty()
+            && self.asset_code.len() <= 64
+            && self.asset_code.bytes().all(|b| b.is_ascii_alphanumeric() || b"_:-".contains(&b))
+            && matches!(self.privacy_rail.as_str(), "confidential-token" | "private-payments")
+            && self.asset_issuer.as_deref()
+                .is_none_or(|issuer| crate::wallet::decode_account_address(issuer).is_some())
+    }
+}
 /// This endpoint is not evidence of chain connectivity; /v1/network verifies live RPC.
 async fn health() -> Json<Health> {
     Json(Health {status:"ok", service:"stealthbridge-backend"})
@@ -299,6 +316,9 @@ async fn corridors(State(state): State<Arc<AppState>>) -> Result<Json<Vec<Corrid
         "SELECT id, origin_country, destination_country, asset_code, asset_issuer, privacy_rail \
          FROM corridors WHERE enabled = TRUE ORDER BY origin_country, destination_country, id"
     ).fetch_all(pool).await.map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    if !rows.iter().all(Corridor::safe_public_record) {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     Ok(Json(rows))
 }
 
@@ -351,6 +371,9 @@ async fn corridor_page(
     .fetch_all(pool)
     .await
     .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    if !rows.iter().all(Corridor::safe_public_record) {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     let has_more = rows.len() > limit as usize;
     rows.truncate(limit as usize);
     let next_cursor = if has_more {
@@ -371,7 +394,11 @@ async fn corridor_by_id(
          FROM corridors WHERE enabled=TRUE AND id=$1"
     ).bind(id).fetch_optional(pool).await
         .map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?
-        .map(Json).ok_or(StatusCode::NOT_FOUND)
+        .ok_or(StatusCode::NOT_FOUND)
+        .and_then(|row| {
+            if row.safe_public_record() { Ok(Json(row)) }
+            else { Err(StatusCode::SERVICE_UNAVAILABLE) }
+        })
 }
 
 #[derive(Serialize)]
