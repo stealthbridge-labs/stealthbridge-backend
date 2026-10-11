@@ -29,6 +29,13 @@ reviews and enables real configuration entries. Never fabricate listings to
 fill the UI. Individual enabled entries can also be looked up via
 `GET /v1/corridors/{id}`.
 
+The backend also revalidates each public corridor record **after reading
+from PostgreSQL**. Invalid country/rail/asset metadata or a non-checksummed
+Stellar issuer G-address causes the affected public catalog request to
+fail closed (503) instead of publishing an unsafe record. This protects
+against direct SQL updates that bypass the operator CLI, but it does not
+verify that a checksum-valid issuer actually owns or authorizes an asset.
+
 All filters are validated before the database query and passed to SQLx as
 **bound parameters**, not SQL fragments. Pagination is ordered by the immutable
 UUID; invalid country/rail/limit/cursor values return HTTP 400. A cursor only
