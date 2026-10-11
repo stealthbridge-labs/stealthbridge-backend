@@ -157,28 +157,44 @@ impl AppState {
 
     async fn network(&self) -> Result<NetworkStatus, ()> {
         let network = self.rpc("getNetwork").await?;
-        let actual_passphrase = network.get("passphrase").and_then(Value::as_str).ok_or(())?;
-        if actual_passphrase != TESTNET_PASSPHRASE {
-            warn!("Configured Stellar RPC did not identify as testnet");
-            return Err(());
-        }
         let latest = self.rpc("getLatestLedger").await?;
-        Ok(NetworkStatus {
-            network: "testnet",
-            passphrase: actual_passphrase.to_owned(),
-            protocol_version: latest.get("protocolVersion").and_then(Value::as_u64).ok_or(())?,
-            ledger_sequence: latest.get("sequence").and_then(Value::as_u64).ok_or(())?,
-            ledger_closed_at_unix: latest.get("closeTime").and_then(Value::as_str).ok_or(())?.to_owned(),
-            ledger_hash: {
-                let hash = latest.get("id").and_then(Value::as_str).ok_or(())?;
-                if !transaction::valid_hash(hash) { return Err(()); }
-                hash.to_ascii_lowercase()
-            },
-            source: "stellar-rpc",
-        })
+        verified_network_status(&network, &latest)
     }
 }
 
+/// Validate both JSON-RPC observations before publishing network state.
+/// Readiness separately determines whether a structurally valid head is fresh.
+fn verified_network_status(network: &Value, latest: &Value) -> Result<NetworkStatus, ()> {
+    let passphrase = network.get("passphrase").and_then(Value::as_str).ok_or(())?;
+    if passphrase != TESTNET_PASSPHRASE {
+        warn!("Configured Stellar RPC did not identify as Testnet");
+        return Err(());
+    }
+    let protocol_version = latest.get("protocolVersion").and_then(Value::as_u64).ok_or(())?;
+    let ledger_sequence = latest.get("sequence").and_then(Value::as_u64).ok_or(())?;
+    if protocol_version == 0 || ledger_sequence == 0 {
+        return Err(());
+    }
+    let closed = latest.get("closeTime").and_then(Value::as_str).ok_or(())?;
+    if closed.is_empty() || closed.len() > 20 || !closed.bytes().all(|b| b.is_ascii_digit())
+        || closed.parse::<u64>().ok().filter(|value| *value > 0).is_none()
+    {
+        return Err(());
+    }
+    let hash = latest.get("id").and_then(Value::as_str).ok_or(())?;
+    if !transaction::valid_hash(hash) {
+        return Err(());
+    }
+    Ok(NetworkStatus {
+        network: "testnet",
+        passphrase: passphrase.to_owned(),
+        protocol_version,
+        ledger_sequence,
+        ledger_closed_at_unix: closed.to_owned(),
+        ledger_hash: hash.to_ascii_lowercase(),
+        source: "stellar-rpc",
+    })
+}
 #[derive(Serialize)]
 pub struct NetworkStatus {
     network: &'static str,
