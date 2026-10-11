@@ -7,6 +7,18 @@
 ## End-to-end platform architecture and delivery priorities
 
 **Full engineering guide:** [Backend architecture, managed PostgreSQL, trust boundaries and delivery gates](docs/ARCHITECTURE-AND-DELIVERY.md).
+**Recently implemented Rust API improvements:** checksum-verified classic Stellar
+issuer G-addresses for disabled corridor candidates; exact metadata filtering
+on `GET /v1/corridors/page` by origin/destination and privacy-rail with
+bounded UUID keyset pages; Testnet RPC redirect and malformed-ledger rejection;
+and `/ready` verification of all seven SQLx migration markers and required
+PostgreSQL tables (not merely a successful TCP connection).
+
+See [corridor catalog and migration-readiness operations](docs/CORRIDOR-CATALOG-OPERATIONS.md)
+for query examples, invalid-input handling, trust boundaries and release
+acceptance. These changes **do not** authorize asset transfers or enable
+confidential/fiat settlements.
+
 
 ```text
 Next.js preview / typed SDK
