@@ -588,6 +588,62 @@ pub fn router(state: AppState) -> Router {
 mod tests {
     use super::*;
     #[test]
+    fn network_rpc_rejects_incompatible_or_malformed_ledger_data() {
+        let correct = json!({"passphrase": TESTNET_PASSPHRASE});
+        let ledger = json!({
+            "protocolVersion": 27, "sequence": 12345,
+            "closeTime": "1790000000", "id": "a".repeat(64),
+        });
+        let valid = verified_network_status(&correct, &ledger).expect("well-formed Testnet ledger");
+        assert_eq!(valid.network, "testnet");
+        assert_eq!(valid.ledger_sequence, 12345);
+        assert_eq!(valid.ledger_hash, "a".repeat(64));
+        assert!(verified_network_status(
+            &json!({"passphrase": "Public Global Stellar Network ; September 2015"}), &ledger
+        ).is_err());
+        for bad in [
+            json!({"protocolVersion": 0, "sequence": 12345, "closeTime": "1790000000", "id": "a".repeat(64)}),
+            json!({"protocolVersion": 27, "sequence": 0, "closeTime": "1790000000", "id": "a".repeat(64)}),
+            json!({"protocolVersion": 27, "sequence": 12345, "closeTime": "yesterday", "id": "a".repeat(64)}),
+            json!({"protocolVersion": 27, "sequence": 12345, "closeTime": "0", "id": "a".repeat(64)}),
+            json!({"protocolVersion": 27, "sequence": 12345, "closeTime": "1790000000", "id": "not-a-ledger-hash"}),
+        ] {
+            assert!(verified_network_status(&correct, &bad).is_err(), "{bad}");
+        }
+        assert!(AppState::checked_rpc_envelope(
+            &json!({"jsonrpc":"2.0","id":"wrong-id","result":ledger})
+        ).is_err());
+    }
+
+    #[tokio::test]
+    async fn stellar_rpc_client_does_not_follow_provider_redirects() {
+        let target_hits = Arc::new(AtomicU64::new(0));
+        let visited = target_hits.clone();
+        let test_app = Router::new()
+            .route("/rpc", post(|| async {
+                (StatusCode::TEMPORARY_REDIRECT, [(header::LOCATION, "/target")])
+            }))
+            .route("/target", post(move || {
+                let visited = visited.clone();
+                async move {
+                    visited.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({"jsonrpc":"2.0","id":"stealthbridge-observer",
+                        "result":{"passphrase":TESTNET_PASSPHRASE}}))
+                }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await.expect("local redirect fixture");
+        let addr = listener.local_addr().expect("address");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, test_app).await.expect("test RPC server");
+        });
+        let mut state = AppState::without_db();
+        state.rpc_url = format!("http://{addr}/rpc");
+        assert!(state.rpc("getNetwork").await.is_err());
+        assert_eq!(target_hits.load(Ordering::SeqCst), 0);
+        handle.abort();
+    }
+    #[test]
     fn corridor_metadata_filters_reject_bad_inputs_before_database_io() {
         let mut params = CorridorPageParams {
             after: None,
