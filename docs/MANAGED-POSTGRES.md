@@ -58,9 +58,9 @@ cargo run --bin corridor-admin -- register \
 
 Replace every placeholder with verified facts. Countries use uppercase ISO
 alpha-2; asset code is 1-64 ASCII letters/numbers/underscore/dash/colon; the
-issuer field is `-` for absent or a syntactically formatted Stellar public
-account address. `privacy-rail` must be `private-payments` or
-`confidential-token`. The CLI **only checks syntax**, not asset existence,
+issuer field is `-` for absent or a **checksum-valid classic Stellar
+public G-address**. Correct checksum does not verify issuer legitimacy. `privacy-rail` must be `private-payments` or
+`confidential-token`. The CLI verifies public-address syntax and checksum, **not** asset existence,
 issuer authorization, available liquidity, KYC eligibility or private transfer
 proofs. It always inserts `enabled=false`. There is deliberately no CLI
 `enable` command.
@@ -86,9 +86,12 @@ python3 scripts/smoke_testnet_http.py \
   --require-live-network --max-ledger-age-seconds 180
 ```
 
-After the schema migration, `GET /ready` should report
-`database=connected` and a fresh `stellar_rpc=connected`, while
-`payments=disabled` remains mandatory. `GET /v1/corridors/page?limit=25`
+After all **seven reviewed SQLx migrations** are applied, `GET /ready` reports
+`database=connected` only when their success markers and the eight required
+application tables are visible. TCP connectivity alone is insufficient;
+missing migrations/tables cause HTTP 503, without applying migrations at
+request time. `stellar_rpc=connected` still requires a fresh Testnet ledger,
+and `payments=disabled` remains mandatory. `GET /v1/corridors/page?limit=25`
 should return a real empty `items` array until approved records are
 activated—never seeded or fabricated corridors.
 
