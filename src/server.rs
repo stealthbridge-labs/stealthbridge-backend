@@ -442,6 +442,36 @@ pub async fn run_ledger_observer(state:AppState) {
     }
 }
 
+/// The expected schema is deliberately versioned alongside the seven
+/// operator-run SQLx migrations. A successful TCP/SELECT 1 alone is not
+/// sufficient: the runtime must have its catalog and internal safeguards.
+const REQUIRED_SCHEMA_VERSIONS: [i64; 7] = [
+    202610080001, 202610080002, 202610080003, 202610080004,
+    202610080005, 202610080006, 202610100001,
+];
+
+async fn database_schema_ready(pool: &PgPool) -> bool {
+    // No implicit migrations, modifications, or sensitive table reads.
+    // SQLx success flags and essential relations are checked in one SELECT.
+    const QUERY: &str = "SELECT COUNT(*) = 7 \
+         AND to_regclass('corridors') IS NOT NULL \
+         AND to_regclass('organizations') IS NOT NULL \
+         AND to_regclass('organization_members') IS NOT NULL \
+         AND to_regclass('stellar_ledger_observer') IS NOT NULL \
+         AND to_regclass('settlement_intents') IS NOT NULL \
+         AND to_regclass('settlement_transition_log') IS NOT NULL \
+         AND to_regclass('provider_event_inbox') IS NOT NULL \
+         AND to_regclass('settlement_outbox') IS NOT NULL \
+         FROM _sqlx_migrations WHERE success = TRUE AND version = ANY($1::bigint[])";
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        sqlx::query_scalar::<_, bool>(QUERY)
+            .bind(REQUIRED_SCHEMA_VERSIONS.as_slice())
+            .fetch_one(pool),
+    )
+    .await
+    .is_ok_and(|result| result.unwrap_or(false))
+}
 /// Ledger heads are freshness-bound independently of RPC HTTP liveness.
 /// A small future-clock allowance tolerates upstream timestamp/clock skew.
 fn ledger_is_fresh(closed_at_unix:&str, now:u64, max_age_secs:u64)->bool {
@@ -477,10 +507,7 @@ async fn readiness(State(state):State<Arc<AppState>>)
         rpc_probe,
         async {
             match &state.db {
-                Some(pool) => tokio::time::timeout(
-                    Duration::from_secs(2),
-                    sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(pool)
-                ).await.is_ok_and(|result| result.is_ok()),
+                Some(pool) => database_schema_ready(pool).await,
                 None => false,
             }
         }
