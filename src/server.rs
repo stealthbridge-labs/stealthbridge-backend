@@ -564,6 +564,29 @@ pub fn router(state: AppState) -> Router {
 mod tests {
     use super::*;
     #[test]
+    fn corridor_metadata_filters_reject_bad_inputs_before_database_io() {
+        let mut params = CorridorPageParams {
+            after: None,
+            limit: Some(25),
+            origin_country: Some("NG".into()),
+            destination_country: Some("GH".into()),
+            privacy_rail: Some("confidential-token".into()),
+        };
+        assert!(valid_corridor_filters(&params));
+        for invalid in ["ng", "NGA", "N1", "", " N", "N\\n"] {
+            params.origin_country = Some(invalid.into());
+            assert!(!valid_corridor_filters(&params), "{invalid:?}");
+        }
+        params.origin_country = None;
+        params.destination_country = Some("usa".into());
+        assert!(!valid_corridor_filters(&params));
+        params.destination_country = None;
+        params.privacy_rail = Some("live-payout".into());
+        assert!(!valid_corridor_filters(&params));
+        params.privacy_rail = None;
+        assert!(valid_corridor_filters(&params));
+    }
+    #[test]
     fn remote_postgres_requires_tls_and_local_ci_remains_supported() {
         assert!(validate_database_transport("postgres://ci:ci@localhost:5432/ci").is_ok());
         assert!(validate_database_transport("postgresql://ci:ci@127.0.0.1/ci").is_ok());
