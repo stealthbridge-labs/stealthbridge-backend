@@ -33,6 +33,18 @@ async fn pages_are_ordered_bounded_and_never_invent_provider_data() {
         fixtures.push(id);
     }
 
+    // A second distinct corridor exercises exact metadata filtering without
+    // disclosing any fabricated quote, bank or live payout capability.
+    let filtered_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO corridors (id,origin_country,destination_country,asset_code,privacy_rail,enabled) \
+         VALUES ($1,'ZA','KE','TEST_FIXTURE','private-payments',TRUE)",
+    )
+    .bind(filtered_id)
+    .execute(&pool)
+    .await
+    .expect("filtered test fixture");
+    fixtures.push(filtered_id);
     let state=AppState::from_env().await.expect("Testnet configuration + DB");
     let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("local listener");
     let addr=listener.local_addr().expect("bound address");
@@ -61,6 +73,39 @@ async fn pages_are_ordered_bounded_and_never_invent_provider_data() {
         assert!(id>Uuid::parse_str(cursor).expect("valid cursor"));
         assert!(item.get("payout_provider").is_none());
         assert!(item.get("fx_quote").is_none());
+    }
+    let only_filtered=client.get(format!(
+        "{base}/v1/corridors/page?origin_country=ZA&destination_country=KE&privacy_rail=private-payments&limit=100"
+    ))
+    .send().await.expect("filtered page");
+    assert_eq!(only_filtered.status(),reqwest::StatusCode::OK);
+    let filtered:Value=only_filtered.json().await.expect("filtered JSON");
+    let filtered_rows=filtered["items"].as_array().expect("filtered array");
+    assert!(filtered_rows.iter().any(|row|row["id"]==filtered_id.to_string()));
+    assert!(filtered_rows.iter().all(|row|
+        row["origin_country"]=="ZA" && row["destination_country"]=="KE"
+            && row["privacy_rail"]=="private-payments"
+    ));
+    let first_filtered=client.get(format!(
+        "{base}/v1/corridors/page?origin_country=AA&destination_country=BB&privacy_rail=confidential-token&limit=2"
+    )).send().await.expect("filtered keyset page");
+    assert_eq!(first_filtered.status(),reqwest::StatusCode::OK);
+    let page:Value=first_filtered.json().await.expect("filtered keyset JSON");
+    assert_eq!(page["items"].as_array().unwrap().len(),2);
+    assert!(page["items"].as_array().unwrap().iter().all(|row|
+        row["origin_country"]=="AA" && row["destination_country"]=="BB"
+    ));
+    for query in [
+        "origin_country=ng",
+        "origin_country=USA",
+        "origin_country=N1",
+        "destination_country=USA",
+        "privacy_rail=live-payout",
+        "privacy_rail=PRIVATE-PAYMENTS",
+    ] {
+        let result=client.get(format!("{base}/v1/corridors/page?{query}"))
+            .send().await.expect("bad metadata filter response");
+        assert_eq!(result.status(),reqwest::StatusCode::BAD_REQUEST, "{query}");
     }
     for query in ["limit=0","limit=101","limit=not_a_number","after=../../health"] {
         let response=client.get(format!("{base}/v1/corridors/page?{query}"))
