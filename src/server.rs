@@ -282,33 +282,60 @@ async fn corridors(State(state): State<Arc<AppState>>) -> Result<Json<Vec<Corrid
 struct CorridorPageParams {
     after: Option<Uuid>,
     limit: Option<u32>,
+    origin_country: Option<String>,
+    destination_country: Option<String>,
+    privacy_rail: Option<String>,
 }
 #[derive(Serialize)]
 struct CorridorPage {
     items: Vec<Corridor>,
     next_cursor: Option<Uuid>,
 }
-/// Keyset pagination by immutable corridor UUID. Never synthesize data or
-/// paginate over unbounded client-provided counts.
+fn valid_corridor_filters(params: &CorridorPageParams) -> bool {
+    let country = |value: &str| value.len() == 2 && value.bytes().all(|b| b.is_ascii_uppercase());
+    params.origin_country.as_deref().is_none_or(country)
+        && params.destination_country.as_deref().is_none_or(country)
+        && params.privacy_rail.as_deref().is_none_or(|rail| {
+            matches!(rail, "private-payments" | "confidential-token")
+        })
+}
+/// Keyset pagination by immutable corridor UUID with optional exact
+/// metadata filters. This is a public *catalog*, not payment eligibility.
 async fn corridor_page(
-    State(state): State<Arc<AppState>>, Query(params): Query<CorridorPageParams>,
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<CorridorPageParams>,
 ) -> Result<Json<CorridorPage>, StatusCode> {
     let limit = params.limit.unwrap_or(25);
-    if !(1..=100).contains(&limit) { return Err(StatusCode::BAD_REQUEST); }
+    if !(1..=100).contains(&limit) || !valid_corridor_filters(&params) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let pool = state.db.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    // Bind every filter. Never concatenate caller-provided SQL fragments.
     let mut rows = sqlx::query_as::<_, Corridor>(
         "SELECT id, origin_country, destination_country, asset_code, asset_issuer, privacy_rail \
          FROM corridors WHERE enabled = TRUE AND ($1::uuid IS NULL OR id > $1) \
-         ORDER BY id LIMIT $2"
+         AND ($3::text IS NULL OR origin_country = $3) \
+         AND ($4::text IS NULL OR destination_country = $4) \
+         AND ($5::text IS NULL OR privacy_rail = $5) \
+         ORDER BY id LIMIT $2",
     )
-    .bind(params.after).bind(i64::from(limit) + 1)
-    .fetch_all(pool).await.map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    .bind(params.after)
+    .bind(i64::from(limit) + 1)
+    .bind(params.origin_country.as_deref())
+    .bind(params.destination_country.as_deref())
+    .bind(params.privacy_rail.as_deref())
+    .fetch_all(pool)
+    .await
+    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     let has_more = rows.len() > limit as usize;
     rows.truncate(limit as usize);
-    let next_cursor = if has_more {rows.last().map(|row| row.id)} else {None};
-    Ok(Json(CorridorPage{items:rows,next_cursor}))
+    let next_cursor = if has_more {
+        rows.last().map(|row| row.id)
+    } else {
+        None
+    };
+    Ok(Json(CorridorPage { items: rows, next_cursor }))
 }
-
 /// Read exactly one operator-configured, enabled corridor. Never invent entries.
 async fn corridor_by_id(
     Path(id):Path<String>,State(state):State<Arc<AppState>>
