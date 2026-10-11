@@ -4,6 +4,7 @@
 use sqlx::postgres::PgPoolOptions;
 use std::{env, process, time::Duration};
 use uuid::Uuid;
+use stealthbridge_backend::wallet::decode_account_address;
 
 #[derive(Debug, PartialEq, Eq)]
 struct Candidate {
@@ -30,13 +31,11 @@ fn parse_candidate(values: &[String]) -> Result<Candidate, &'static str> {
     // Syntax screening only, not issuer authorization, asset existence or token verification.
     let issuer = if values[3] == "-" {
         None
-    } else if values[3].len() == 56
-        && values[3].starts_with('G')
-        && values[3].bytes().all(|b| b.is_ascii_uppercase() || (b'2'..=b'7').contains(&b))
+    } else if decode_account_address(&values[3]).is_some()
     {
         Some(values[3].clone())
     } else {
-        return Err("issuer must be '-' or a 56-character Stellar public account address");
+        return Err("issuer must be '-' or a checksum-valid classic Stellar G-address");
     };
     if !["private-payments", "confidential-token"].contains(&values[4].as_str()) {
         return Err("privacy rail must be private-payments or confidential-token");
@@ -108,7 +107,7 @@ async fn main() {
 mod tests {
     use super::*;
     fn valid() -> Vec<String> {
-        ["NG", "GH", "USDC", &format!("G{}", "A".repeat(55)), "confidential-token"]
+        ["NG", "GH", "USDC", "GAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB7JZX", "confidential-token"]
             .into_iter().map(str::to_owned).collect()
     }
 
@@ -129,6 +128,14 @@ mod tests {
         assert!(parse_candidate(&values).is_err());
     }
 
+    #[test]
+    fn rejects_issuer_with_valid_shape_but_invalid_stellar_checksum() {
+        let mut values = valid();
+        values[3] = "G".to_owned() + &"A".repeat(55);
+        assert!(parse_candidate(&values).is_err());
+        values[3] = "GAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB7JZA".into();
+        assert!(parse_candidate(&values).is_err());
+    }
     #[test]
     fn permits_unknown_issuer_as_null_only() {
         let mut values = valid();
