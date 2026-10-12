@@ -145,7 +145,7 @@ mod tests {
         // A failed/aborted worker also drops its dedicated connection and
         // PostgreSQL releases any remaining session-level lease.
         assert!(try_observer_lease(&mut first).await.unwrap());
-        drop(first);
+        first.close().await.expect("close failed worker session");
         let mut resumed=PgConnection::connect(&database_url).await.unwrap();
         assert!(try_observer_lease(&mut resumed).await.unwrap());
         assert!(release_observer_lease(&mut resumed).await.unwrap());
