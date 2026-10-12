@@ -55,6 +55,7 @@ paths:
           content:
             application/json:
               schema: {$ref: "#/components/schemas/NetworkStatus"}
+        "429": {$ref: "#/components/responses/ApiError"}
         "502": {$ref: "#/components/responses/ApiError"}
   /v1/contracts:
     get:
@@ -159,6 +160,7 @@ paths:
               schema: {$ref: "#/components/schemas/TransactionObservation"}
         "400": {$ref: "#/components/responses/ApiError"}
         "404": {$ref: "#/components/responses/ApiError"}
+        "429": {$ref: "#/components/responses/ApiError"}
         "502": {$ref: "#/components/responses/ApiError"}
   /v1/settlements:
     post:
