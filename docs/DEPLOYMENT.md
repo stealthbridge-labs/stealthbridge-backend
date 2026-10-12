@@ -23,6 +23,15 @@ Expected: `/v1/network` returns the actual ledger head and protocol. Settlements
 ## Scale/security
 Serve behind TLS, managed DDoS controls and request limits. Add service-level auth and tenant-aware settlement reads *before enabling write endpoints*. Do not publish KYC records or private witnesses to this API. Do not expose a database administrative operation publicly.
 
+
+## Public Stellar RPC capacity protection
+
+`GET /v1/network` and `GET /v1/transactions/{hash}` share a fixed-window quota of **60 reads per minute per directly verified TCP peer** (configurable via `STEALTHBRIDGE_RPC_READS_PER_MINUTE`, integer 1–120). Requests exceeding quota return **429**, a structured `RATE_LIMITED` error with a request ID and `Retry-After: 60`. Other public metadata routes keep their existing availability semantics. There are no fee or transfer-success claims.
+
+The native Rust listener attaches peer `SocketAddr` from the actual connection. Forwarding headers (`X-Forwarded-For`, `CF-Connecting-IP`, client-ID claims) are **never trusted** as identity, preventing easy spoofing. In Vercel Functions, where direct TCP peer identity is not supplied, requests use a **shared anonymous per-function-instance quota**. Multiple function instances **do not share quotas**; configure global identity-aware rate limiting at a trusted upstream gateway or WAF, stripping untrusted forwarding headers and protecting the direct origin. The per-instance limiter bounds IP buckets to 1,024 entries and shares a fallback quota under saturation.
+
+Outbound Stellar RPC uses an eight-second timeout, a strict two-MiB streamed-response limit, redirect denial and a 16-request **non-waiting concurrency budget**. Saturation returns a classified upstream-unavailable error without unbounded waiting. Transaction hashes and RPC Testnet passphrases are validated before interpreting transaction observations. No request body, wallet data or financial event payload is logged.
+
 ## Vercel Rust Functions adapter
 
 The repository contains `api/axum.rs` and `vercel.json`, adapting the **same Axum router** through the official `vercel_runtime` Rust Functions runtime (currently beta). A Vercel project can import `stealthbridge-labs/stealthbridge-backend` with the Rust/Axum preset. The adapter creates a request-handling service, not an always-on listener.
