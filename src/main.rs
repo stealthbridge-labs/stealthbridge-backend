@@ -8,9 +8,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let state = stealthbridge_backend::server::AppState::from_env().await?;
+    // Durable observer polling belongs ONLY to the supervised ledger-worker
+    // process. Serverless Functions and local HTTP requests must never spawn it.
     if env::var("STEALTHBRIDGE_ENABLE_LEDGER_OBSERVER").ok().as_deref()==Some("true"){
-        let worker=state.clone();
-        let _observer_handle = tokio::spawn(async move {stealthbridge_backend::server::run_ledger_observer(worker).await;});
+        return Err("Observer flag is not supported in HTTP mode; run cargo run --bin ledger-worker".into());
     }
     let app = stealthbridge_backend::server::router(state);
     let port: u16 = env::var("PORT").unwrap_or_else(|_| "8080".to_owned()).parse()?;
