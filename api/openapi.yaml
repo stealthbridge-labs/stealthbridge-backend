@@ -105,10 +105,19 @@ paths:
           schema: {type: integer, minimum: 1, maximum: 100, default: 25}
         - name: origin_country
           in: query
-          description: Optional exact uppercase two-letter origin country, metadata only
-          schema: {type: string, pattern: '^[A-Z]{2}
+          description: Optional uppercase two-letter origin country, metadata only
+          schema: {type: string, pattern: "^[A-Z]{2}$"}
+        - name: destination_country
+          in: query
+          description: Optional uppercase two-letter destination country, metadata only
+          schema: {type: string, pattern: "^[A-Z]{2}$"}
+        - name: privacy_rail
+          in: query
+          description: Operator-declared research rail, not payout eligibility
+          schema: {type: string, enum: [confidential-token, private-payments]}
+      responses:
         "200":
-          description: Page from current configured database state; no FX or payout claims
+          description: Enabled operator-configured corridor page, no FX or payouts
           content:
             application/json:
               schema: {$ref: "#/components/schemas/CorridorPage"}
