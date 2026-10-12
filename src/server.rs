@@ -730,10 +730,10 @@ mod tests {
     use super::*;
     #[test]
     fn public_rpc_budget_is_bounded_per_peer_and_resets_only_after_window() {
-        let start=Instant::now();
         let peer:IpAddr="127.0.0.1".parse().unwrap();
         let other:IpAddr="127.0.0.2".parse().unwrap();
         let mut limit=PublicReadLimiter::new(2);
+        let start=Instant::now();
         assert!(limit.admit(Some(peer),start));
         assert!(limit.admit(Some(peer),start));
         assert!(!limit.admit(Some(peer),start));
