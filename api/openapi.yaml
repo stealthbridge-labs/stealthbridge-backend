@@ -107,7 +107,6 @@ paths:
           in: query
           description: Optional exact uppercase two-letter origin country, metadata only
           schema: {type: string, pattern: '^[A-Z]{2}
-      responses:
         "200":
           description: Page from current configured database state; no FX or payout claims
           content:
@@ -272,9 +271,8 @@ components:
 }
         - name: destination_country
           in: query
-          description: Optional exact uppercase two-letter destination country, metadata only
+          description: Optional exact uppercase two-letter destination country
           schema: {type: string, pattern: '^[A-Z]{2}
-      responses:
         "200":
           description: Page from current configured database state; no FX or payout claims
           content:
@@ -439,7 +437,7 @@ components:
 }
         - name: privacy_rail
           in: query
-          description: Operator-declared research rail, not proof of payment availability
+          description: Operator-declared research rail; no payout availability implied
           schema: {type: string, enum: [confidential-token, private-payments]}
       responses:
         "200":
