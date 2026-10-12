@@ -1,14 +1,15 @@
 use axum::{
     body::{to_bytes,Body},
     extract::{Path, Query, State}, http::{header,HeaderValue,Request,StatusCode},
-    middleware::{from_fn,Next}, response::Response, routing::{get, post}, Json, Router,
+    middleware::{from_fn,from_fn_with_state,Next}, response::{IntoResponse,Response}, routing::{get, post}, Json, Router,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, FromRow, PgPool};
-use std::{env, error::Error, sync::{atomic::{AtomicBool,AtomicU64,Ordering},Arc}, time::{Duration,Instant,SystemTime,UNIX_EPOCH}};
+use std::{collections::HashMap, env, error::Error, net::{IpAddr,SocketAddr}, sync::{atomic::{AtomicBool,AtomicU64,Ordering},Arc,Mutex}, time::{Duration,Instant,SystemTime,UNIX_EPOCH}};
 use tokio::sync::Semaphore;
+use axum::extract::ConnectInfo;
 use tracing::warn;
 use uuid::Uuid;
 use crate::transaction::{self,TransactionObservation};
@@ -18,6 +19,87 @@ use crate::ledger::{self, VerifiedHead, LedgerCheckpoint};
 const TESTNET_PASSPHRASE: &str = "Test SDF Network ; September 2015";
 const MAX_RPC_BODY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_IN_FLIGHT_RPC: usize = 16;
+
+const DEFAULT_RPC_READS_PER_MINUTE: u32 = 60;
+const MAX_RPC_READS_PER_MINUTE: u32 = 120;
+const MAX_RATE_LIMIT_BUCKETS: usize = 1024;
+const RATE_WINDOW: Duration = Duration::from_secs(60);
+
+/// Fixed one-minute buckets keyed ONLY by a trusted direct socket peer.
+/// Never trust user-submitted forwarding headers as an identity source.
+/// Vercel Functions lack a socket peer; fall back to one shared per-instance
+/// anonymous bucket. Deploy a trusted edge limiter for globally fair quotas.
+struct RateWindow { started: Instant, count: u32 }
+impl RateWindow {
+    fn new(now: Instant) -> Self { Self {started:now,count:0} }
+    fn take(&mut self, now:Instant, maximum:u32)->bool {
+        if now.duration_since(self.started)>=RATE_WINDOW {
+            self.started=now;
+            self.count=0;
+        }
+        if self.count>=maximum{return false;}
+        self.count+=1;
+        true
+    }
+}
+struct PublicReadLimiter {
+    maximum:u32,
+    peers:HashMap<IpAddr,RateWindow>,
+    anonymous:RateWindow,
+}
+impl PublicReadLimiter {
+    fn new(maximum:u32)->Self {
+        Self {maximum,peers:HashMap::new(),anonymous:RateWindow::new(Instant::now())}
+    }
+    fn admit(&mut self,client:Option<IpAddr>,now:Instant)->bool {
+        if let Some(ip)=client {
+            if !self.peers.contains_key(&ip) && self.peers.len()>=MAX_RATE_LIMIT_BUCKETS {
+                self.peers.retain(|_,bucket|now.duration_since(bucket.started)<RATE_WINDOW);
+                if self.peers.len()>=MAX_RATE_LIMIT_BUCKETS {
+                    // Bounded memory, never bypass the quota on table exhaustion.
+                    return self.anonymous.take(now,self.maximum);
+                }
+            }
+            return self.peers.entry(ip).or_insert_with(||RateWindow::new(now)).take(now,self.maximum);
+        }
+        self.anonymous.take(now,self.maximum)
+    }
+}
+fn configured_read_limit()->Result<u32,Box<dyn Error>>{
+    let configured=env::var("STEALTHBRIDGE_RPC_READS_PER_MINUTE")
+        .unwrap_or_else(|_|DEFAULT_RPC_READS_PER_MINUTE.to_string());
+    let value:u32=configured.parse()
+        .map_err(|_|"STEALTHBRIDGE_RPC_READS_PER_MINUTE must be an integer from 1 through 120")?;
+    if !(1..=MAX_RPC_READS_PER_MINUTE).contains(&value){
+        return Err("STEALTHBRIDGE_RPC_READS_PER_MINUTE must be between 1 and 120".into());
+    }
+    Ok(value)
+}
+async fn limit_public_rpc_reads(
+    State(state):State<Arc<AppState>>,
+    request:Request<Body>,
+    next:Next,
+)->Response {
+    let path=request.uri().path();
+    let costly=path=="/v1/network" || path.starts_with("/v1/transactions/");
+    if !costly || request.method()!=axum::http::Method::GET {
+        return next.run(request).await;
+    }
+    // Do not parse X-Forwarded-For, CF-Connecting-IP or caller-supplied keys.
+    let peer=request.extensions().get::<ConnectInfo<SocketAddr>>().map(|value|value.0.ip());
+    let permitted={
+        let mut guard=state.rpc_rate_limit.lock()
+            .unwrap_or_else(|poisoned|poisoned.into_inner());
+        guard.admit(peer,Instant::now())
+    };
+    if !permitted {
+        let mut response=StatusCode::TOO_MANY_REQUESTS.into_response();
+        response.headers_mut().insert(header::RETRY_AFTER,HeaderValue::from_static("60"));
+        return response;
+    }
+    next.run(request).await
+}
+
 
 /// Refuse accidental plaintext PostgreSQL credentials over remote networks.
 /// Loopback Postgres remains available for isolated local CI and development.
@@ -56,6 +138,7 @@ pub struct AppState {
     rpc_url: String,
     db: Option<PgPool>,
     rpc_permits: Arc<Semaphore>,
+    rpc_rate_limit: Arc<Mutex<PublicReadLimiter>>,
     metrics_token:Option<String>,
     metrics:Arc<ReadinessMetrics>,
 }
@@ -105,6 +188,7 @@ impl AppState {
         };
         let metrics_token=env::var("STEALTHBRIDGE_METRICS_TOKEN").ok().filter(|value|!value.is_empty());
         Ok(Self {http,rpc_url,db,rpc_permits:Arc::new(Semaphore::new(MAX_IN_FLIGHT_RPC)),
+            rpc_rate_limit:Arc::new(Mutex::new(PublicReadLimiter::new(configured_read_limit()?))),
             metrics_token,metrics:Arc::new(ReadinessMetrics::default())})
     }
 
@@ -115,6 +199,7 @@ impl AppState {
             rpc_url: "https://soroban-testnet.stellar.org".to_owned(),
             db: None,
             rpc_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT_RPC)),
+            rpc_rate_limit: Arc::new(Mutex::new(PublicReadLimiter::new(DEFAULT_RPC_READS_PER_MINUTE))),
             metrics_token:None,
             metrics:Arc::new(ReadinessMetrics::default()),
         }
@@ -127,7 +212,7 @@ impl AppState {
     async fn rpc_with_params(&self, method: &str, params: Option<Value>) -> Result<Value, ()> {
         // Backpressure is bounded: no unbounded simultaneous Stellar RPC calls.
         // Permit release is automatic, including after timeout/cancellation.
-        let _permit = self.rpc_permits.acquire().await.map_err(|_| ())?;
+        let _permit = self.rpc_permits.try_acquire().map_err(|_| ())?;
         let mut response = self.http.post(&self.rpc_url)
             .json(&json!({"jsonrpc":"2.0","id":"stealthbridge-observer","method":method,"params":params.unwrap_or(json!({}))}))
             .send().await.map_err(|_| ())?;
@@ -621,6 +706,7 @@ async fn internal_metrics(State(state):State<Arc<AppState>>,headers:axum::http::
 }
 
 pub fn router(state: AppState) -> Router {
+    let state=Arc::new(state);
     Router::new()
         .route("/health",get(health))
         .route("/ready",get(readiness))
@@ -634,13 +720,47 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/corridors/{id}",get(corridor_by_id))
         .route("/v1/transactions/{hash}",get(public_transaction))
         .route("/v1/settlements",post(disabled))
+        .layer(from_fn_with_state(Arc::clone(&state),limit_public_rpc_reads))
         .layer(from_fn(diagnostic_responses))
-        .with_state(Arc::new(state))
+        .with_state(state)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn public_rpc_budget_is_bounded_per_peer_and_resets_only_after_window() {
+        let start=Instant::now();
+        let peer:IpAddr="127.0.0.1".parse().unwrap();
+        let other:IpAddr="127.0.0.2".parse().unwrap();
+        let mut limit=PublicReadLimiter::new(2);
+        assert!(limit.admit(Some(peer),start));
+        assert!(limit.admit(Some(peer),start));
+        assert!(!limit.admit(Some(peer),start));
+        assert!(limit.admit(Some(other),start));
+        assert!(limit.admit(None,start));
+        assert!(limit.admit(None,start));
+        assert!(!limit.admit(None,start));
+        assert!(limit.admit(Some(peer),start+Duration::from_secs(61)));
+    }
+
+    #[tokio::test]
+    async fn public_rpc_429_stays_structured_and_does_not_serve_mock_data() {
+        use tower::ServiceExt;
+        let mut state=AppState::without_db();
+        state.rpc_rate_limit=Arc::new(Mutex::new(PublicReadLimiter::new(1)));
+        let app=router(state);
+        let request=||Request::builder()
+            .uri("/v1/transactions/not-a-valid-hash")
+            .body(Body::empty()).unwrap();
+        let first=app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(first.status(),StatusCode::BAD_REQUEST);
+        let second=app.oneshot(request()).await.unwrap();
+        assert_eq!(second.status(),StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(second.headers().get("x-error-code").unwrap(),"RATE_LIMITED");
+        assert_eq!(second.headers().get(header::RETRY_AFTER).unwrap(),"60");
+    }
+
     #[test]
     fn network_rpc_rejects_incompatible_or_malformed_ledger_data() {
         let correct = json!({"passphrase": TESTNET_PASSPHRASE});
