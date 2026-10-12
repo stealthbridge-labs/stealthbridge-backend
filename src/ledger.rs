@@ -1,7 +1,7 @@
 //! Testnet-only durable ledger-head cursor for an opt-in read-only observer.
 //! A stored ledger head is not a payment event, payout, or private proof.
 use serde::Serialize;
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Row, PgConnection};
 
 const TESTNET_PASSPHRASE: &str = "Test SDF Network ; September 2015";
 
@@ -39,6 +39,28 @@ impl VerifiedHead {
         }
         Ok(())
     }
+}
+
+/// A PostgreSQL *session*-level advisory lease for one supervised Testnet observer.
+/// This must use a dedicated raw PgConnection, never a pooled connection: a
+/// pooled connection can retain a session lock after the worker is cancelled.
+const OBSERVER_LEASE_NAMESPACE: i32 = 0x5342544e;
+const OBSERVER_LEASE_ID: i32 = 1;
+
+pub async fn try_observer_lease(connection: &mut PgConnection) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1, $2)")
+        .bind(OBSERVER_LEASE_NAMESPACE)
+        .bind(OBSERVER_LEASE_ID)
+        .fetch_one(connection)
+        .await
+}
+
+pub async fn release_observer_lease(connection: &mut PgConnection) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock($1, $2)")
+        .bind(OBSERVER_LEASE_NAMESPACE)
+        .bind(OBSERVER_LEASE_ID)
+        .fetch_one(connection)
+        .await
 }
 
 /// Transactional monotonic checkpointing; a same-sequence hash disagreement is
@@ -109,6 +131,26 @@ mod tests {
             ledger_closed_at_unix:"1760000000".to_owned(),
         }
     }
+    #[tokio::test]
+    async fn observer_advisory_lease_is_exclusive_and_recoverable_after_release() {
+        use sqlx::Connection;
+        let Some(database_url)=std::env::var("DATABASE_URL").ok() else {return;};
+        let mut first=PgConnection::connect(&database_url).await.expect("first isolated connection");
+        let mut competing=PgConnection::connect(&database_url).await.expect("competing isolated connection");
+        assert!(try_observer_lease(&mut first).await.unwrap());
+        assert!(!try_observer_lease(&mut competing).await.unwrap());
+        assert!(release_observer_lease(&mut first).await.unwrap());
+        assert!(try_observer_lease(&mut competing).await.unwrap());
+        assert!(release_observer_lease(&mut competing).await.unwrap());
+        // A failed/aborted worker also drops its dedicated connection and
+        // PostgreSQL releases any remaining session-level lease.
+        assert!(try_observer_lease(&mut first).await.unwrap());
+        drop(first);
+        let mut resumed=PgConnection::connect(&database_url).await.unwrap();
+        assert!(try_observer_lease(&mut resumed).await.unwrap());
+        assert!(release_observer_lease(&mut resumed).await.unwrap());
+    }
+
     #[test]
     fn fails_closed_on_network_or_untrustworthy_hash() {
         assert!(fixture().validate().is_ok());
