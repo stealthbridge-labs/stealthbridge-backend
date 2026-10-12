@@ -35,6 +35,13 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - name: Test live-ledger freshness and safe degraded behavior
         run: python3 -m unittest scripts/test_smoke_testnet_http.py
+      - name: Regression tests for canonical manifest and consumer API compatibility
+        run: python3 -m unittest scripts/test_manifest_parity.py scripts/test_verify_consumer_contracts.py
+      - name: Check backend API against pinned SDK and frontend source
+        env:
+          STEALTHBRIDGE_SDK_REF: 1cd88fb1db81a2c30167babe71484963dd5287e7
+          STEALTHBRIDGE_FRONTEND_REF: 2f2edaa6ae5c653d9acae12f9ec5dea6161b9bcc
+        run: python3 scripts/verify_consumer_contracts.py
       - name: Verify deployment snapshot matches pinned undeployed contracts source
         env:
           STEALTHBRIDGE_CONTRACTS_REF: 4c01631028bde15385a0e73e39c5c635dca17b35
