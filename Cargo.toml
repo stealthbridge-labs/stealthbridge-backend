@@ -27,3 +27,12 @@ tower = "0.5"
 [[bin]]
 name = "main"
 path = "api/axum.rs"
+
+# Local Axum server and observer are intentionally distinct processes.
+[[bin]]
+name = "api-server"
+path = "src/main.rs"
+
+[[bin]]
+name = "ledger-observer"
+path = "src/bin/ledger-observer.rs"
