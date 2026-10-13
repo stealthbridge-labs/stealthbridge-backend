@@ -14,6 +14,7 @@ use tracing::warn;
 use uuid::Uuid;
 use crate::transaction::{self,TransactionObservation};
 use crate::ledger::{self, VerifiedHead, LedgerCheckpoint};
+use crate::ledger_events;
 
 /// The only network accepted until privacy, compliance and security gates are satisfied.
 const TESTNET_PASSPHRASE: &str = "Test SDF Network ; September 2015";
@@ -539,6 +540,30 @@ pub async fn run_ledger_observer(state:AppState) {
         warn!("Read-only ledger worker requires DATABASE_URL");
         return;
     };
+    let configured_events=match env::var("STEALTHBRIDGE_OBSERVER_CONTRACTS"){
+        Ok(raw)=>match ledger_events::configured_contracts(&raw){
+            Ok(ids)=>ids,
+            Err(_)=>{
+                warn!("Invalid public Testnet observer contract ID configuration; worker stopped");
+                return;
+            }
+        },
+        Err(_)=>Vec::new(),
+    };
+    let bootstrap_start=if configured_events.is_empty(){
+        0
+    }else{
+        let parsed=env::var("STEALTHBRIDGE_OBSERVER_START_LEDGER")
+            .ok().and_then(|value|value.parse::<u64>().ok())
+            .filter(|value|*value>0&&*value<=i64::MAX as u64);
+        match parsed{
+            Some(value)=>value,
+            None=>{
+                warn!("Explicit positive observer bootstrap ledger required; cannot skip event history");
+                return;
+            }
+        }
+    };
     loop {
         let mut lease_connection=match sqlx::PgConnection::connect(&database_url).await {
             Ok(connection)=>connection,
@@ -582,6 +607,43 @@ pub async fn run_ledger_observer(state:AppState) {
                     };
                     if let Err(error)=ledger::record_head(&pool,&head).await {
                         warn!(error=?error,"Ledger checkpoint rejected or storage unavailable");
+                        continue;
+                    }
+                    // When no contract addresses are explicitly provisioned,
+                    // preserve head-only read observability and never invent
+                    // contract IDs from an undeployed source manifest.
+                    for contract_id in &configured_events{
+                        let progress=match ledger_events::load_progress(&pool,contract_id,bootstrap_start).await{
+                            Ok(value)=>value,
+                            Err(error)=>{
+                                warn!(error=?error,"Event cursor unavailable; no public event data recorded");
+                                continue;
+                            }
+                        };
+                        let params=match ledger_events::rpc_params(contract_id,&progress){
+                            Ok(value)=>value,
+                            Err(_)=>{
+                                warn!("Configured event cursor was invalid");
+                                continue;
+                            }
+                        };
+                        let result=match state.rpc_with_params("getEvents",Some(params)).await{
+                            Ok(value)=>value,
+                            Err(_)=>{
+                                warn!("Bounded Stellar getEvents request unavailable; public cursor preserved");
+                                continue;
+                            }
+                        };
+                        match ledger_events::parse_events(&result,contract_id,&progress){
+                            Ok(page)=>{
+                                if let Err(error)=ledger_events::record_event_page(
+                                    &pool,contract_id,&progress,&page,
+                                ).await{
+                                    warn!(error=?error,"Event journal rejected page; cursor unchanged");
+                                }
+                            }
+                            Err(error)=>warn!(error=?error,"Unverified/pruned event page; manual recovery required"),
+                        }
                     }
                 }
                 Err(_)=>warn!("Stellar Testnet observer could not verify upstream RPC"),
@@ -596,15 +658,19 @@ pub async fn run_ledger_observer(state:AppState) {
 /// The expected schema is deliberately versioned alongside the seven
 /// operator-run SQLx migrations. A successful TCP/SELECT 1 alone is not
 /// sufficient: the runtime must have its catalog and internal safeguards.
-const REQUIRED_SCHEMA_VERSIONS: [i64; 7] = [
+const REQUIRED_SCHEMA_VERSIONS: [i64; 9] = [
     202610080001, 202610080002, 202610080003, 202610080004,
     202610080005, 202610080006, 202610100001,
+    202610130001, 202610130002,
 ];
 
 async fn database_schema_ready(pool: &PgPool) -> bool {
     // No implicit migrations, modifications, or sensitive table reads.
     // SQLx success flags and essential relations are checked in one SELECT.
-    const QUERY: &str = "SELECT COUNT(*) = 7 \
+    const QUERY: &str = "SELECT COUNT(*) = 9 \
+         AND to_regclass('organization_login_challenges') IS NOT NULL \
+         AND to_regclass('stellar_contract_event_cursors') IS NOT NULL \
+         AND to_regclass('stellar_contract_event_journal') IS NOT NULL \
          AND to_regclass('corridors') IS NOT NULL \
          AND to_regclass('organizations') IS NOT NULL \
          AND to_regclass('organization_members') IS NOT NULL \
