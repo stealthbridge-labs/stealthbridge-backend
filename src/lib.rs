@@ -7,3 +7,4 @@ pub mod ledger;
 pub mod authz;
 pub mod webhook;
 pub mod wallet;
+pub mod org_auth;
