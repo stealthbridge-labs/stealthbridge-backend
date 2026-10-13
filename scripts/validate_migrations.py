@@ -34,6 +34,9 @@ def validate_sources(files,server):
             require("CREATE TABLE IF NOT EXISTS" in source,
                     f"additive migration {version} must create tables safely")
             stripped=re.sub(r"--[^\n]*","",source)
+            # An FK ON DELETE RESTRICT protects parent records; it is not
+            # a DELETE DML statement and must not trip the destructive guard.
+            stripped=re.sub(r"\bON\s+DELETE\s+RESTRICT\b","",stripped,flags=re.I)
             require(not re.search(r"\b(DROP|TRUNCATE|DELETE|UPDATE|GRANT|REVOKE)\b",
                                   stripped,re.I),
                     f"migration {version} performs unreviewed destructive or permission SQL")
