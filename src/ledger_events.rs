@@ -261,7 +261,7 @@ pub struct JournalDiagnostics{
  pub earliest_resume_ledger:Option<i64>,
 }
 pub async fn diagnostics(pool:&PgPool)->Result<JournalDiagnostics,sqlx::Error>{
- let row=sqlx::query("SELECT     (SELECT COUNT(*) FROM stellar_contract_event_cursors WHERE network='testnet') AS tracked_contracts,     (SELECT COUNT(*) FROM stellar_contract_event_journal WHERE network='testnet') AS public_event_rows,     (SELECT GREATEST(0,EXTRACT(EPOCH FROM (now()-MIN(observed_at)))::bigint)        FROM stellar_contract_event_cursors WHERE network='testnet') AS cursor_age_seconds,     (SELECT MIN(next_start_ledger) FROM stellar_contract_event_cursors        WHERE network='testnet') AS earliest_resume_ledger")
+ let row=sqlx::query("SELECT     (SELECT COUNT(*) FROM stellar_contract_event_cursors WHERE network='testnet') AS tracked_contracts,     (SELECT COUNT(*) FROM stellar_contract_event_journal WHERE network='testnet') AS public_event_rows,     (SELECT CASE WHEN COUNT(*)=0 THEN NULL ELSE GREATEST(0,EXTRACT(EPOCH FROM (now()-MIN(observed_at)))::bigint) END FROM stellar_contract_event_cursors WHERE network='testnet') AS cursor_age_seconds,     (SELECT MIN(next_start_ledger) FROM stellar_contract_event_cursors        WHERE network='testnet') AS earliest_resume_ledger")
   .fetch_one(pool).await?;
  Ok(JournalDiagnostics{
   tracked_contracts:row.try_get("tracked_contracts")?,
