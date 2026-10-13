@@ -1,0 +1,19 @@
+name: Public Testnet observer read-only evidence
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 8 * * 1'
+permissions:
+  contents: read
+jobs:
+  live-public-rpc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate strict network/passphrase/retention cases offline
+        run: python3 -m unittest scripts/test_smoke_public_testnet_rpc.py
+      - name: Record live public Stellar Testnet RPC ledger and official SAC event envelope
+        run: python3 scripts/smoke_public_testnet_rpc.py
