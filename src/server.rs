@@ -861,6 +861,37 @@ pub fn router(state: AppState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn sensitive_observer_metrics_are_hidden_without_operator_bearer() {
+        use tower::ServiceExt;
+        let unconfigured=router(AppState::without_db());
+        let req=||Request::builder().uri("/internal/metrics")
+            .body(Body::empty()).unwrap();
+        let absent=unconfigured.oneshot(req()).await.unwrap();
+        assert_eq!(absent.status(),StatusCode::NOT_FOUND);
+
+        let mut state=AppState::without_db();
+        state.metrics_token=Some("unit-test-operator-bearer-1234567890".to_owned());
+        let app=router(state);
+        let unauthorized=app.clone().oneshot(req()).await.unwrap();
+        assert_eq!(unauthorized.status(),StatusCode::UNAUTHORIZED);
+        let invalid=app.clone().oneshot(Request::builder().uri("/internal/metrics")
+            .header(header::AUTHORIZATION,"Bearer invalid")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(invalid.status(),StatusCode::UNAUTHORIZED);
+        let accepted=app.oneshot(Request::builder().uri("/internal/metrics")
+            .header(header::AUTHORIZATION,"Bearer unit-test-operator-bearer-1234567890")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(accepted.status(),StatusCode::OK);
+        let bytes=to_bytes(accepted.into_body(),16_384).await.unwrap();
+        let metrics=core::str::from_utf8(&bytes).unwrap();
+        assert!(metrics.contains("stealthbridge_database_configured 0"));
+        // No DB is configured: never fabricate observer metrics or emit IDs.
+        assert!(!metrics.contains("stealthbridge_observer_public_events_stored"));
+        assert!(!metrics.contains("contract_id"));
+        assert!(!metrics.contains("transaction_hash"));
+    }
+
     #[test]
     fn public_rpc_budget_is_bounded_per_peer_and_resets_only_after_window() {
         let peer:IpAddr="127.0.0.1".parse().unwrap();
