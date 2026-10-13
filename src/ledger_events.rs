@@ -250,6 +250,27 @@ pub async fn record_event_page(
  Ok(after)
 }
 
+/// Safe aggregate state only. Never include contract IDs, event IDs, hashes,
+/// topics, private values, principals, wallet identities or RPC payloads in
+/// public or operator metrics.
+#[derive(Debug)]
+pub struct JournalDiagnostics{
+ pub tracked_contracts:i64,
+ pub public_event_rows:i64,
+ pub oldest_cursor_age_seconds:Option<i64>,
+ pub earliest_resume_ledger:Option<i64>,
+}
+pub async fn diagnostics(pool:&PgPool)->Result<JournalDiagnostics,sqlx::Error>{
+ let row=sqlx::query("SELECT     (SELECT COUNT(*) FROM stellar_contract_event_cursors WHERE network='testnet') AS tracked_contracts,     (SELECT COUNT(*) FROM stellar_contract_event_journal WHERE network='testnet') AS public_event_rows,     (SELECT GREATEST(0,EXTRACT(EPOCH FROM (now()-MIN(observed_at)))::bigint)        FROM stellar_contract_event_cursors WHERE network='testnet') AS cursor_age_seconds,     (SELECT MIN(next_start_ledger) FROM stellar_contract_event_cursors        WHERE network='testnet') AS earliest_resume_ledger")
+  .fetch_one(pool).await?;
+ Ok(JournalDiagnostics{
+  tracked_contracts:row.try_get("tracked_contracts")?,
+  public_event_rows:row.try_get("public_event_rows")?,
+  oldest_cursor_age_seconds:row.try_get("cursor_age_seconds")?,
+  earliest_resume_ledger:row.try_get("earliest_resume_ledger")?,
+ })
+}
+
 #[cfg(test)]
 mod tests{
  use super::*;
