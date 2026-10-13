@@ -157,7 +157,18 @@ pub fn next_progress(before:&Progress,page:&EventPage)->Result<Progress,JournalE
  let(start_ledger,cursor)=if page.events.is_empty(){
   (page.latest_ledger.checked_add(1).ok_or(JournalError::InvalidPage)?,None)
  }else{
-  (before.start_ledger,page.cursor.clone())
+  // A cursor is opaque to the client, but the most recently observed ledger
+  // is verified public event metadata. Persist its sequence as our retention
+  // floor. Keeping the *initial* bootstrap ledger here causes a healthy
+  // long-lived cursor (or a resumed worker) to be falsely classified as
+  // pruned as soon as RPC's rolling oldestLedger moves past the bootstrap.
+  // The cursor still takes precedence: rpc_params omits startLedger whenever
+  // cursor is present, per the Stellar getEvents pagination contract.
+  let last=page.events.last().ok_or(JournalError::InvalidPage)?.ledger;
+  if last<before.start_ledger||last>page.latest_ledger||page.cursor.is_none(){
+   return Err(JournalError::InvalidPage);
+  }
+  (last,page.cursor.clone())
  };
  Ok(Progress{start_ledger,cursor})
 }
@@ -278,6 +289,32 @@ mod tests{
   let clear=json!({"latestLedger":101,"oldestLedger":90,"events":[],"cursor":"final"});
   let next=parse_events(&clear,EXAMPLE_CONTRACT,&progress()).unwrap();
   assert_eq!(next_progress(&progress(),&next).unwrap().start_ledger,102);
+ }
+ #[test]
+ fn event_cursor_retention_floor_advances_with_observed_ledger(){
+  let progress=Progress{start_ledger:100,cursor:None};
+  let event_id="0000000000000000101-0000000001";
+  let payload=json!({"latestLedger":105,"oldestLedger":90,"cursor":event_id,
+    "events":[{"id":event_id,"type":"contract","contractId":EXAMPLE_CONTRACT,
+     "txHash":"a".repeat(64),"ledger":101}]});
+  let page=parse_events(&payload,EXAMPLE_CONTRACT,&progress).unwrap();
+  let resumed=next_progress(&progress,&page).unwrap();
+  assert_eq!(resumed.start_ledger,101);
+  assert_eq!(resumed.cursor.as_deref(),Some(event_id));
+  let params=rpc_params(EXAMPLE_CONTRACT,&resumed).unwrap();
+  assert!(params.get("startLedger").is_none());
+  assert_eq!(params["pagination"]["cursor"],json!(event_id));
+  // RPC retention can advance beyond the historical bootstrap ledger while
+  // the still-live cursor remains safe to use. A genuine pruned cursor fails.
+  let next=json!({"latestLedger":106,"oldestLedger":101,"cursor":"0000000000000000102-0000000001",
+    "events":[{"id":"0000000000000000102-0000000001","type":"contract",
+      "contractId":EXAMPLE_CONTRACT,"txHash":"b".repeat(64),"ledger":102}]});
+  let second=parse_events(&next,EXAMPLE_CONTRACT,&resumed).unwrap();
+  assert_eq!(next_progress(&resumed,&second).unwrap().start_ledger,102);
+  let pruned=json!({"latestLedger":106,"oldestLedger":103,"cursor":"0000000000000000103-0000000001",
+    "events":[]});
+  assert!(matches!(parse_events(&pruned,EXAMPLE_CONTRACT,&resumed),
+    Err(JournalError::PrunedHistory)));
  }
  #[test]
  fn rejects_pruning_malformed_events_and_out_of_order_pages(){
