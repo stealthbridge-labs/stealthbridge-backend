@@ -118,6 +118,13 @@ pub struct ScopedVerifiedEvent{
  pub key_id:String,
  pub event:VerifiedEvent,
 }
+#[derive(Clone,Copy)]
+pub struct ProviderScope<'a>{
+ pub tenant:Uuid,
+ pub provider:&'a str,
+ pub key_id:&'a str,
+ pub keyring:&'a [ProviderKey<'a>],
+}
 const SCOPED_DOMAIN:&[u8]=b"stealthbridge-provider-callback-v2\n";
 const MAX_KEYRING:usize=8;
 
@@ -126,9 +133,9 @@ const MAX_KEYRING:usize=8;
 /// configuration; NEVER from an unsigned request body or arbitrary header.
 pub fn verify_scoped_event(
  raw:&[u8],timestamp:&str,signature_hex:&str,
- tenant:Uuid,provider:&str,key_id:&str,keyring:&[ProviderKey<'_>],
- now_unix:i64,
+ scope:ProviderScope<'_>,now_unix:i64,
 )->Result<ScopedVerifiedEvent,VerifyError>{
+ let ProviderScope{tenant,provider,key_id,keyring}=scope;
  if tenant.is_nil()||!id_ok(provider)||!id_ok(key_id)||
     keyring.is_empty()||keyring.len()>MAX_KEYRING||
     keyring.iter().any(|k| !id_ok(k.id)||k.secret.len()<32||
@@ -203,7 +210,8 @@ mod tests{
     mac.update(issued.as_bytes());mac.update(b"\n");mac.update(raw);
     let signature=hex::encode(mac.finalize().into_bytes());
     let verify=|tenant,provider,id,keys:&[ProviderKey<'_>],now|{
-      verify_scoped_event(raw,issued,&signature,tenant,provider,id,keys,now)
+      verify_scoped_event(raw,issued,&signature,
+        ProviderScope{tenant,provider,key_id:id,keyring:keys},now)
     };
     let event=verify(tenant,provider,id,&keys,1_760_000_150).unwrap();
     assert_eq!(event.tenant,tenant);
@@ -214,14 +222,14 @@ mod tests{
     assert!(matches!(verify(tenant,"other-provider",id,&keys,1_760_000_150),Err(VerifyError::BadSignature)));
     assert!(matches!(verify(tenant,provider,"rotation-key-02",&keys,1_760_000_150),Err(VerifyError::BadSignature)));
     assert!(matches!(verify(tenant,provider,id,&keys,1_760_010_001),Err(VerifyError::Expired)));
-    assert!(matches!(verify_scoped_event(b"tampered",issued,&signature,tenant,provider,id,&keys,1_760_000_150),Err(VerifyError::BadSignature)));
+    assert!(matches!(verify_scoped_event(b"tampered",issued,&signature,ProviderScope{tenant,provider,key_id:id,keyring:&keys},1_760_000_150),Err(VerifyError::BadSignature)));
     let duplicate=[keys[0],keys[0]];
     assert!(matches!(verify(tenant,provider,id,&duplicate,1_760_000_150),Err(VerifyError::InvalidPayload)));
     assert!(matches!(verify(Uuid::nil(),provider,id,&keys,1_760_000_150),Err(VerifyError::InvalidPayload)));
     // Out-of-order verified notifications are isolated inbox metadata: they
     // do not call settlement::transition or trigger a payout.
     let earlier=br#"{"event_id":"fixture-event-003","event_type":"payout.completed"}"#;
-    assert!(verify_scoped_event(earlier,issued,&signature,tenant,provider,id,&keys,1_760_000_150).is_err());
+    assert!(verify_scoped_event(earlier,issued,&signature,ProviderScope{tenant,provider,key_id:id,keyring:&keys},1_760_000_150).is_err());
  }
  #[test]
  fn signature_tampering_and_expired_delivery_rejected(){
