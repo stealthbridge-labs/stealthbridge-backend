@@ -97,3 +97,23 @@ Use GitHub Actions → **Protected Testnet staging smoke** → **Run workflow** 
 The workflow runs Python's bounded JSON checks against the actual API: /health, capabilities, canonical **not-deployed** contract discovery, readiness, fresh real Testnet network head, rejected settlement POST 501, and malformed transaction hash rejection. It fails closed on a stale/mismatched network, unsafe capabilities, JSON drift or protected-deployment redirects; it never signs or sends actual settlements. Successful local fixture tests do **not** count as a post-Vercel live test. Retain the GitHub run URL and associated Vercel staging deployment commit as release evidence.
 
 At the time this workflow was added, **Vercel environment-variable inspection was not authorized** under the connected project's team scope. The workflow is not proof that a protected staging URL has been configured or that an actual Vercel deployment has been accepted. Issue #9 remains open until a real strict workflow run succeeds.
+
+## Opt-in contract event journal — Testnet public identifiers only
+
+Official API reference: [Stellar RPC `getEvents`](https://developers.stellar.org/docs/data/apis/rpc/api-reference/methods/getEvents) and [pagination](https://developers.stellar.org/docs/data/apis/rpc/api-reference/structure/pagination). The node has a bounded recent history (commonly ~7 days, measured by `oldestLedger`); the worker **never silently skips a pruned checkpoint**.
+
+After independently verifying a deployed contract ID and applying **all nine** reviewed SQLx migrations, operators may opt in up to five trusted contract IDs by setting:
+
+```text
+STEALTHBRIDGE_WORKER_MODE=readonly-testnet-observer
+STEALTHBRIDGE_OBSERVER_CONTRACTS=<one-to-five-comma-separated-C-StrKeys>
+STEALTHBRIDGE_OBSERVER_START_LEDGER=<actual-source-ledger-at-or-before-contract-activation>
+```
+
+Do not copy placeholder contract IDs into deployment configuration. `deployments/testnet/manifest.json` remains **not-deployed**, so **no StealthBridge contract event observation is active by default**. Startup **fails closed** when IDs are malformed/duplicated, configuration requests more than five contracts, or the initial ledger is missing/non-positive. The env-selected ledger must be inside RPC retention; if `getEvents.oldestLedger` exceeds the saved cursor window, observation stops and requires a **manually reviewed gap-recovery plan** (alternative archival source with independent verification). Never jump forward and label data reconciled.
+
+The supervised worker first verifies live Testnet network/passphrase/head under an exclusive PostgreSQL advisory lease, then queries **one contract per RPC call**, with a fixed `limit=25`, a JSON-RPC network timeout, 2 MiB streamed-body cap and nonwaiting 16-request shared semaphore. Requests use a filter by exact StrKey C-address and `type=contract`, `xdrFormat=base64`. The opaque RPC pagination cursor is kept durable **without** a `startLedger` argument on cursor pages. Empty pages advance to the RPC-reported latest ledger plus one; records and cursor advance in the **same SQL transaction**, preventing crash/restart duplicate application. Concurrent replay, duplicate public event IDs and conflicting transaction hashes are rejected or deduplicated.
+
+The new `stellar_contract_event_journal` stores **only** public `contract_id`, `event_id`, transaction hash, ledger sequence, fixed observation-state label and insertion time. It **does not** persist `topic`, `value`, encrypted balances, ciphertext, memo, payer/recipient personal data, proof witnesses, account keys, or private payments. **Event inclusion is not an assertion of execution success, finality, private transfer validity or fiat payout**; no settlement transition is ever triggered. Deployed protocol verifiers require a separate reviewed source+proof/audit chain.
+
+Retention and operations: preserve the journal for the organization's approved audit period (proposed 90 days, **not automatically enforced**). Define archive/export and exact retention SQL with security/compliance before adopting deletion. Track RPC `oldestLedger`, `latestLedger`, observer checkpoint lag, cursor age, duplicate event rates and rejected conflicting IDs. SQL migrations are never applied by the Vercel handler or the worker automatically. Replaying a gap requires explicit operator evidence and resync approval, not environment-variable edits that impersonate settlement history.

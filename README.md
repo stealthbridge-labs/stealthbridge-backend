@@ -11,7 +11,7 @@
 issuer G-addresses for disabled corridor candidates; exact metadata filtering
 on `GET /v1/corridors/page` by origin/destination and privacy-rail with
 bounded UUID keyset pages; Testnet RPC redirect and malformed-ledger rejection;
-and `/ready` verification of all seven SQLx migration markers and required
+and `/ready` verification of all nine SQLx migration markers, including login challenge and public event journal and required
 PostgreSQL tables (not merely a successful TCP connection).
 
 See [corridor catalog and migration-readiness operations](docs/CORRIDOR-CATALOG-OPERATIONS.md)
