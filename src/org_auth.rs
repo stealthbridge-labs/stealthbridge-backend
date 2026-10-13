@@ -233,7 +233,10 @@ mod tests{
   assert!(verify_session_claims(&token,secret,"evil.example.com",identity.authenticated_at_unix+1).is_err());
   assert!(verify_session_claims(&token,secret,&identity.domain,identity.authenticated_at_unix+SESSION_SECONDS).is_err());
   assert!(verify_session_claims(&token,b"different-test-session-secret-should-fail",&identity.domain,identity.authenticated_at_unix+1).is_err());
-  let tampered=format!("{}0",&token[..token.len()-1]);
+  // A deterministic mutation must always differ: the original MAC hex
+  // may already end with '0' for roughly 1/16 of valid signed sessions.
+  let replacement=if token.ends_with('0'){"1"}else{"0"};
+  let tampered=format!("{}{}",&token[..token.len()-1],replacement);
   assert!(verify_session_claims(&tampered,secret,&identity.domain,identity.authenticated_at_unix+1).is_err());
   assert!(issue_read_session(&identity,b"short").is_err());
  }
