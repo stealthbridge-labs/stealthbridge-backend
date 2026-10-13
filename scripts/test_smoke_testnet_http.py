@@ -35,6 +35,17 @@ def fake_probe(age=10, degraded=False):
     return probe
 
 class SmokeVerificationTests(unittest.TestCase):
+    def test_deployment_bypass_only_reads_validated_environment_secret(self):
+        with patch.dict("os.environ",{},clear=True):
+            self.assertEqual(smoke.protected_headers(),{"Accept":"application/json"})
+        with patch.dict("os.environ",{"STEALTHBRIDGE_VERCEL_BYPASS_TOKEN":"test-bypass_123"}):
+            self.assertEqual(smoke.protected_headers()["x-vercel-protection-bypass"],"test-bypass_123")
+        with patch.dict("os.environ",{"STEALTHBRIDGE_VERCEL_BYPASS_TOKEN":"secret\\r\\nInjected: true"}):
+            with self.assertRaisesRegex(ValueError,"bypass secret format"):
+                smoke.protected_headers()
+    def test_redirects_are_never_followed_with_staging_bypass(self):
+        with self.assertRaisesRegex(ValueError,"redirected"):
+            smoke.BlockRedirect().redirect_request(None,None,302,"redirect",{},"https://attacker.invalid")
     def test_fresh_live_ledger_passes(self):
         with patch.object(smoke, "probe", fake_probe()):
             smoke.verify("https://api.example", require_live_network=True)
