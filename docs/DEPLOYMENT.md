@@ -68,3 +68,24 @@ python3 scripts/smoke_testnet_http.py --url "https://your-staging-backend.exampl
 ```
 
 The script fails on non-JSON responses, wrong Testnet metadata, accidentally enabled capabilities, unexpected RPC errors, unverified contract deployment or a settlement write that is not disabled. A 502 from network or a 503 degraded readiness result is accepted only when a structured dependency failure explains the outage; do not interpret these as a successful ledger observation. Run on every approved staging deployment, and after configuring the actual deployed API URL, not against a mocked production endpoint. CI does not require staging credentials or automatically deploy. Do not run smoke probes against a URL containing a token.
+
+
+## Separate runtime ownership: HTTP Functions vs Testnet observer
+
+The **only Vercel deployable Rust binary** is `main` at `api/axum.rs`; it creates an Axum request handler, does not poll, does not run migrations and does not start a task that outlives a request. The native local HTTP binary is `api-server`; it refuses `STEALTHBRIDGE_ENABLE_LEDGER_OBSERVER=true` instead of silently launching a background task.
+
+A separately supervised durable process must be launched explicitly:
+
+```bash
+# With operator-configured, secure DATABASE_URL and Testnet-only STELLAR_RPC_URL:
+STEALTHBRIDGE_WORKER_MODE=readonly-testnet-observer cargo run --locked --release --bin ledger-observer
+```
+
+Only use a supervised continuously running worker platform (VM, managed worker or container with restart policy); **do not deploy this binary as a Vercel Function or cron**. Ensure a single reviewed release/config owner is assigned to the worker and a different release owner for the public API. The operator provisions migrations outside both processes; the observer starts only after required tables exist. The `DATABASE_URL` credentials are limited to the necessary Testnet observation tables and read-only RPC access. Neither binary holds a wallet secret or can move funds.
+
+### Lease and restart invariants
+
+The worker takes a PostgreSQL **session advisory lock** with a dedicated `PgConnection`, never a connection from the request-handler SQLx pool; competing worker processes back off without polling RPC or modifying the checkpoint. The worker checks a fresh `SELECT 1` heartbeat before each 15-second observation. A failed heartbeat closes the session, releases the lock, and triggers a safe retry. On process crash or explicit session close, PostgreSQL releases the lock automatically. Restart resumes from the same PostgreSQL monotonic `stellar_ledger_observer` checkpoint. Equal observations are idempotent, older observations ignored, and same-sequence conflicting hashes reported and never overwritten. Tests run with isolated CI PostgreSQL sessions and assert exclusive lease, release and restart acquisition.
+
+Supervisor health should check the process, PostgreSQL lock ownership, `GET /v1/observer` freshness and metrics. No connection should idle silently while appearing healthy. The current checkpoint is **public ledger metadata, not a private transfer observer or fiat reconciliation receipt**. Configured contract event reconciliation and retention upgrades remain distinct future work in issue #2.
+

@@ -529,28 +529,67 @@ async fn observer_head(
 /// Must be enabled explicitly with STEALTHBRIDGE_ENABLE_LEDGER_OBSERVER=true.
 /// Run one designated observer per environment to avoid redundant RPC polling.
 pub async fn run_ledger_observer(state:AppState) {
+    use sqlx::Connection;
     let Some(pool)=state.db.clone() else {
-        warn!("Ledger observer requested but PostgreSQL is not configured");
+        warn!("Read-only ledger worker cannot start without PostgreSQL");
         return;
     };
-    let mut interval=tokio::time::interval(Duration::from_secs(15));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Dedicated session connection: advisory locks must never leak into a pool.
+    let Ok(database_url)=env::var("DATABASE_URL") else {
+        warn!("Read-only ledger worker requires DATABASE_URL");
+        return;
+    };
     loop {
-        interval.tick().await;
-        match state.network().await {
-            Ok(status)=>{
-                let head=VerifiedHead{
-                    passphrase:status.passphrase,
-                    ledger_sequence:status.ledger_sequence,
-                    ledger_hash:status.ledger_hash,
-                    ledger_closed_at_unix:status.ledger_closed_at_unix,
-                };
-                if let Err(error)=ledger::record_head(&pool,&head).await {
-                    warn!(error=?error,"Ledger checkpoint rejected or storage unavailable");
-                }
+        let mut lease_connection=match sqlx::PgConnection::connect(&database_url).await {
+            Ok(connection)=>connection,
+            Err(_)=>{
+                warn!("Ledger worker cannot establish dedicated lease connection");
+                tokio::time::sleep(Duration::from_secs(15)).await;
+                continue;
             }
-            Err(_)=>warn!("Stellar Testnet observer could not verify upstream RPC"),
+        };
+        match ledger::try_observer_lease(&mut lease_connection).await {
+            Ok(true)=>{},
+            Ok(false)=>{
+                // Another durable worker owns the lock. Never poll or write.
+                tokio::time::sleep(Duration::from_secs(15)).await;
+                continue;
+            }
+            Err(_)=>{
+                warn!("Ledger worker could not validate exclusive lease");
+                tokio::time::sleep(Duration::from_secs(15)).await;
+                continue;
+            }
         }
+        let mut interval=tokio::time::interval(Duration::from_secs(15));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            // The active lease remains valid only while this private session
+            // responds. A failed heartbeat halts the writer and reconnects.
+            if sqlx::query_scalar::<_,i32>("SELECT 1")
+                .fetch_one(&mut lease_connection).await.is_err() {
+                warn!("Ledger worker lost its database lease heartbeat; pausing observation");
+                break;
+            }
+            match state.network().await {
+                Ok(status)=>{
+                    let head=VerifiedHead{
+                        passphrase:status.passphrase,
+                        ledger_sequence:status.ledger_sequence,
+                        ledger_hash:status.ledger_hash,
+                        ledger_closed_at_unix:status.ledger_closed_at_unix,
+                    };
+                    if let Err(error)=ledger::record_head(&pool,&head).await {
+                        warn!(error=?error,"Ledger checkpoint rejected or storage unavailable");
+                    }
+                }
+                Err(_)=>warn!("Stellar Testnet observer could not verify upstream RPC"),
+            }
+        }
+        // Dropping the dedicated session releases any remaining advisory lock.
+        drop(lease_connection);
+        tokio::time::sleep(Duration::from_secs(15)).await;
     }
 }
 
