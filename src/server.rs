@@ -804,9 +804,37 @@ async fn internal_metrics(State(state):State<Arc<AppState>>,headers:axum::http::
     let age_line=if age==u64::MAX{String::new()}else{format!("stealthbridge_observed_ledger_age_seconds {age}\n")};
     let db_configured=u8::from(metrics.database_configured.load(Ordering::Relaxed));
     let db_available=u8::from(metrics.database_available.load(Ordering::Relaxed));
-    let body=format!("# HELP stealthbridge_readiness_rpc_probes_total Readiness RPC probes.\n# TYPE stealthbridge_readiness_rpc_probes_total counter\nstealthbridge_readiness_rpc_probes_total {}\n# HELP stealthbridge_readiness_rpc_probe_errors_total Failed readiness RPC probes.\n# TYPE stealthbridge_readiness_rpc_probe_errors_total counter\nstealthbridge_readiness_rpc_probe_errors_total {}\n# HELP stealthbridge_readiness_rpc_probe_latency_ms_sum Cumulative readiness RPC probe latency in milliseconds.\n# TYPE stealthbridge_readiness_rpc_probe_latency_ms_sum counter\nstealthbridge_readiness_rpc_probe_latency_ms_sum {}\n# HELP stealthbridge_database_configured Whether PostgreSQL is configured.\n# TYPE stealthbridge_database_configured gauge\nstealthbridge_database_configured {db_configured}\n# HELP stealthbridge_database_available Whether configured PostgreSQL is reachable.\n# TYPE stealthbridge_database_available gauge\nstealthbridge_database_available {db_available}\n# HELP stealthbridge_observed_ledger_age_seconds Age of the latest verified Testnet ledger head.\n# TYPE stealthbridge_observed_ledger_age_seconds gauge\n{age_line}# HELP stealthbridge_journal_transitions_total Public journal transitions; no public transition API is enabled.\n# TYPE stealthbridge_journal_transitions_total counter\nstealthbridge_journal_transitions_total 0\n",
+    let mut body=format!("# HELP stealthbridge_readiness_rpc_probes_total Readiness RPC probes.\n# TYPE stealthbridge_readiness_rpc_probes_total counter\nstealthbridge_readiness_rpc_probes_total {}\n# HELP stealthbridge_readiness_rpc_probe_errors_total Failed readiness RPC probes.\n# TYPE stealthbridge_readiness_rpc_probe_errors_total counter\nstealthbridge_readiness_rpc_probe_errors_total {}\n# HELP stealthbridge_readiness_rpc_probe_latency_ms_sum Cumulative readiness RPC probe latency in milliseconds.\n# TYPE stealthbridge_readiness_rpc_probe_latency_ms_sum counter\nstealthbridge_readiness_rpc_probe_latency_ms_sum {}\n# HELP stealthbridge_database_configured Whether PostgreSQL is configured.\n# TYPE stealthbridge_database_configured gauge\nstealthbridge_database_configured {db_configured}\n# HELP stealthbridge_database_available Whether configured PostgreSQL is reachable.\n# TYPE stealthbridge_database_available gauge\nstealthbridge_database_available {db_available}\n# HELP stealthbridge_observed_ledger_age_seconds Age of the latest verified Testnet ledger head.\n# TYPE stealthbridge_observed_ledger_age_seconds gauge\n{age_line}# HELP stealthbridge_journal_transitions_total Public journal transitions; no public transition API is enabled.\n# TYPE stealthbridge_journal_transitions_total counter\nstealthbridge_journal_transitions_total 0\n",
         metrics.rpc_probes_total.load(Ordering::Relaxed),metrics.rpc_probe_errors_total.load(Ordering::Relaxed),
         metrics.rpc_probe_latency_ms_sum.load(Ordering::Relaxed));
+    if let Some(pool)=state.db.as_ref(){
+        // Auth check above precedes all SQL. Bound the read-only diagnostic
+        // query so an unhealthy/oversized event journal cannot hang a
+        // metrics scrape. Do not fake zero metrics when PostgreSQL is down.
+        let snapshot=tokio::time::timeout(Duration::from_secs(2),
+            ledger_events::diagnostics(pool)).await
+            .map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?
+            .map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?;
+        body.push_str(&format!(
+          "# HELP stealthbridge_observer_contracts_tracked Configured Testnet observer cursors.\n\
+           # TYPE stealthbridge_observer_contracts_tracked gauge\n\
+           stealthbridge_observer_contracts_tracked {}\n\
+           # HELP stealthbridge_observer_public_events_stored Public event identifier rows. No proof or settlement status.\n\
+           # TYPE stealthbridge_observer_public_events_stored gauge\n\
+           stealthbridge_observer_public_events_stored {}\n",
+          snapshot.tracked_contracts,snapshot.public_event_rows));
+        if let (Some(age),Some(sequence))=(
+           snapshot.oldest_cursor_age_seconds,snapshot.earliest_resume_ledger
+        ){
+            body.push_str(&format!(
+             "# HELP stealthbridge_observer_oldest_cursor_age_seconds Age of least recently updated cursor.\n\
+              # TYPE stealthbridge_observer_oldest_cursor_age_seconds gauge\n\
+              stealthbridge_observer_oldest_cursor_age_seconds {age}\n\
+              # HELP stealthbridge_observer_earliest_resume_ledger Minimum public event resume ledger.\n\
+              # TYPE stealthbridge_observer_earliest_resume_ledger gauge\n\
+              stealthbridge_observer_earliest_resume_ledger {sequence}\n"));
+        }
+    }
     Ok((StatusCode::OK,[(header::CONTENT_TYPE,HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"))],body))
 }
 
@@ -833,6 +861,37 @@ pub fn router(state: AppState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn sensitive_observer_metrics_are_hidden_without_operator_bearer() {
+        use tower::ServiceExt;
+        let unconfigured=router(AppState::without_db());
+        let req=||Request::builder().uri("/internal/metrics")
+            .body(Body::empty()).unwrap();
+        let absent=unconfigured.oneshot(req()).await.unwrap();
+        assert_eq!(absent.status(),StatusCode::NOT_FOUND);
+
+        let mut state=AppState::without_db();
+        state.metrics_token=Some("unit-test-operator-bearer-1234567890".to_owned());
+        let app=router(state);
+        let unauthorized=app.clone().oneshot(req()).await.unwrap();
+        assert_eq!(unauthorized.status(),StatusCode::UNAUTHORIZED);
+        let invalid=app.clone().oneshot(Request::builder().uri("/internal/metrics")
+            .header(header::AUTHORIZATION,"Bearer invalid")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(invalid.status(),StatusCode::UNAUTHORIZED);
+        let accepted=app.oneshot(Request::builder().uri("/internal/metrics")
+            .header(header::AUTHORIZATION,"Bearer unit-test-operator-bearer-1234567890")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(accepted.status(),StatusCode::OK);
+        let bytes=to_bytes(accepted.into_body(),16_384).await.unwrap();
+        let metrics=core::str::from_utf8(&bytes).unwrap();
+        assert!(metrics.contains("stealthbridge_database_configured 0"));
+        // No DB is configured: never fabricate observer metrics or emit IDs.
+        assert!(!metrics.contains("stealthbridge_observer_public_events_stored"));
+        assert!(!metrics.contains("contract_id"));
+        assert!(!metrics.contains("transaction_hash"));
+    }
+
     #[test]
     fn public_rpc_budget_is_bounded_per_peer_and_resets_only_after_window() {
         let peer:IpAddr="127.0.0.1".parse().unwrap();

@@ -117,3 +117,16 @@ The supervised worker first verifies live Testnet network/passphrase/head under 
 The new `stellar_contract_event_journal` stores **only** public `contract_id`, `event_id`, transaction hash, ledger sequence, fixed observation-state label and insertion time. It **does not** persist `topic`, `value`, encrypted balances, ciphertext, memo, payer/recipient personal data, proof witnesses, account keys, or private payments. **Event inclusion is not an assertion of execution success, finality, private transfer validity or fiat payout**; no settlement transition is ever triggered. Deployed protocol verifiers require a separate reviewed source+proof/audit chain.
 
 Retention and operations: preserve the journal for the organization's approved audit period (proposed 90 days, **not automatically enforced**). Define archive/export and exact retention SQL with security/compliance before adopting deletion. Track RPC `oldestLedger`, `latestLedger`, observer checkpoint lag, cursor age, duplicate event rates and rejected conflicting IDs. SQL migrations are never applied by the Vercel handler or the worker automatically. Replaying a gap requires explicit operator evidence and resync approval, not environment-variable edits that impersonate settlement history.
+
+## Read-only Testnet observer liveness: private-free operator metrics
+
+With `STEALTHBRIDGE_METRICS_BEARER_TOKEN` configured through the backend's trusted environment, `GET /internal/metrics` requires exact `Authorization: Bearer …` and returns **Prometheus-style aggregate gauges**. Unconfigured metrics return 404; invalid or missing credentials return 401 before any database read. Never put metrics credentials in frontend JavaScript, logs, screenshots or shell history.
+
+If the PostgreSQL event-journal tables are configured and healthy, the output includes:
+
+- `stealthbridge_observer_contracts_tracked` — count of distinct configured Testnet contract resume cursors.
+- `stealthbridge_observer_public_events_stored` — count of persisted **public event IDs**, not proof-verified transfers, payouts or confirmed wallet payments.
+- `stealthbridge_observer_oldest_cursor_age_seconds` — staleness of the least recently updated cursor when at least one exists.
+- `stealthbridge_observer_earliest_resume_ledger` — minimum replay/retention floor across configured cursors.
+
+If no worker/cursor exists, age and ledger metrics are omitted (not falsely reported as fresh). If PostgreSQL cannot answer the bounded 2-second metrics query, return 503 and alert rather than fabricate healthy metrics. No contract IDs, event IDs, transaction hashes, private proofs or wallet account labels are exposed in these gauges. Monitor cursor age *together* with Stellar RPC `oldestLedger` and overall `/ready` status. A healthy process or successful CI does not attest an actual payment or cryptographic confidentiality.

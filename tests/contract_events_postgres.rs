@@ -31,6 +31,11 @@ async fn event_journal_recovers_after_restarts_without_duplicate_or_conflicting_
  let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM stellar_contract_event_journal \
    WHERE network='testnet' AND contract_id=$1").bind(contract).fetch_one(&pool).await.unwrap();
  assert_eq!(count,1);
+ let snapshot=stealthbridge_backend::ledger_events::diagnostics(&pool).await.unwrap();
+ assert!(snapshot.tracked_contracts>=1);
+ assert!(snapshot.public_event_rows>=1);
+ assert!(snapshot.oldest_cursor_age_seconds.is_some());
+ assert!(snapshot.earliest_resume_ledger.is_some());
  let persisted:String=sqlx::query_scalar("SELECT transaction_hash FROM stellar_contract_event_journal \
    WHERE network='testnet' AND contract_id=$1").bind(contract).fetch_one(&pool).await.unwrap();
  assert_eq!(persisted,"a".repeat(64));
