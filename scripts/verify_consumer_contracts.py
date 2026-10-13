@@ -50,21 +50,36 @@ def required_fields(yaml, name):
         raise ValueError(f"Missing OpenAPI property for {name}")
     return keys
 
-def verify_contracts(backend_yaml, pinned_sdk_yaml, frontend_types):
+def generated_fields(generated, interface):
+    match=re.search(rf"(?m)^export interface {re.escape(interface)} \{{\s*$",generated)
+    if not match:
+        raise ValueError(f"Missing SDK-generated interface {interface}")
+    body=generated[match.end():].split("\n}",1)[0]
+    return set(re.findall(r"(?m)^  ([a-z_]+)\??:",body))
+
+def verify_contracts(backend_yaml, pinned_sdk_yaml, frontend_types,
+                     frontend_mirror, canonical_sdk_generated):
     if backend_yaml!=pinned_sdk_yaml:
         raise ValueError("Breaking API drift: SDK pinned OpenAPI snapshot differs from backend")
+    if frontend_mirror!=canonical_sdk_generated:
+        raise ValueError("Frontend SDK wire type mirror differs from pinned reviewed SDK source")
+    if '"./sdk-api-wire.v0.2"' not in frontend_types:
+        raise ValueError("Frontend must import the reviewed SDK-generated API models")
     if not all(symbol in frontend_types for symbol in
-               ("networkResponse(", "capabilitiesResponse(", "readFilteredCorridorPage(")):
+               ("networkResponse(", "capabilitiesResponse(", "readFilteredCorridorPage(",
+                "checkpointResponse(", "transactionResponse(")):
         raise ValueError("Missing frontend runtime response guards")
     for backend, frontend in CONSUMERS.items():
-        if not re.search(rf"(?m)^export interface {frontend} ",frontend_types):
-            raise ValueError(f"Frontend missing {frontend} wire interface")
+        model="Api"+backend
+        if not re.search(
+            rf"(?m)^export interface {re.escape(frontend)} extends {re.escape(model)} \{{",frontend_types
+        ):
+            raise ValueError(f"Frontend {frontend} no longer inherits its SDK wire interface {model}")
         required=required_fields(backend_yaml, backend)
-        # The TypeScript component must declare every backend-required key.
-        snippet=frontend_types.split(f"export interface {frontend} ",1)[1].split("}",1)[0]
+        actual=generated_fields(canonical_sdk_generated,model)
         for field in required:
-            if not re.search(rf"\b{re.escape(field)}\??\s*:",snippet):
-                raise ValueError(f"Frontend {frontend} missing required API property {field}")
+            if field not in actual:
+                raise ValueError(f"Generated SDK {model} missing required API property {field}")
     return len(CONSUMERS)
 
 def main():
@@ -73,7 +88,11 @@ def main():
                     "specs/backend-openapi.v0.3.yaml")
     frontend=load_remote(FRONTEND_REPO, os.environ.get("STEALTHBRIDGE_FRONTEND_REF"),
                          "src/lib/bridge-api.ts")
-    count=verify_contracts(api,sdk,frontend)
+    frontend_mirror=load_remote(FRONTEND_REPO, os.environ.get("STEALTHBRIDGE_FRONTEND_REF"),
+                                "src/lib/sdk-api-wire.v0.2.ts")
+    sdk_generated=load_remote(SDK_REPO, os.environ.get("STEALTHBRIDGE_SDK_REF"),
+                              "src/generated/api-wire.ts")
+    count=verify_contracts(api,sdk,frontend,frontend_mirror,sdk_generated)
     print(f"PASS: backend API matches pinned SDK source and {count} frontend response interfaces")
 
 if __name__=="__main__":
