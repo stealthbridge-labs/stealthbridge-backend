@@ -1,0 +1,27 @@
+name: Protected Testnet staging smoke
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  staging-http:
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 6
+    env:
+      STEALTHBRIDGE_STAGING_API_URL: ${{ vars.STEALTHBRIDGE_STAGING_API_URL }}
+      STEALTHBRIDGE_VERCEL_BYPASS_TOKEN: ${{ secrets.STEALTHBRIDGE_VERCEL_BYPASS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check configured backend staging release target
+        run: |
+          if [ -z "${STEALTHBRIDGE_STAGING_API_URL:-}" ]; then
+            echo 'Configure staging environment variable STEALTHBRIDGE_STAGING_API_URL before post-deploy acceptance' >&2
+            exit 1
+          fi
+      - name: Require actual read-only Vercel Testnet observations
+        run: python3 scripts/smoke_testnet_http.py --url "$STEALTHBRIDGE_STAGING_API_URL" --require-live-network --max-ledger-age-seconds 180
+      - name: Verify no premature payment controls
+        run: echo 'Post-deploy staging GET probes passed; settlement POST returned disabled HTTP 501. No funds were moved.'

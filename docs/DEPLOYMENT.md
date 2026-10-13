@@ -89,3 +89,11 @@ The worker takes a PostgreSQL **session advisory lock** with a dedicated `PgConn
 
 Supervisor health should check the process, PostgreSQL lock ownership, `GET /v1/observer` freshness and metrics. No connection should idle silently while appearing healthy. The current checkpoint is **public ledger metadata, not a private transfer observer or fiat reconciliation receipt**. Configured contract event reconciliation and retention upgrades remain distinct future work in issue #2.
 
+
+## Operator-triggered live staging verification (GitHub Actions)
+
+Use GitHub Actions → **Protected Testnet staging smoke** → **Run workflow** **after** reviewing an actual Vercel backend staging deployment and its immutable commit SHA. The job uses the protected GitHub `staging` environment and requires `STEALTHBRIDGE_STAGING_API_URL` as an **environment variable** (only the clean HTTPS backend origin, no credentials, path, query or fragment). For deployment protection, set the optional `STEALTHBRIDGE_VERCEL_BYPASS_TOKEN` as a **secret**, never put it in the URL, PR, issue, log or command line. Have a reviewer approve the exact staging commit and workflow run; use a dedicated staging project/environment isolated from public marketing. This is an authorized operator acceptance step, **not** automatic deployment or release promotion.
+
+The workflow runs Python's bounded JSON checks against the actual API: /health, capabilities, canonical **not-deployed** contract discovery, readiness, fresh real Testnet network head, rejected settlement POST 501, and malformed transaction hash rejection. It fails closed on a stale/mismatched network, unsafe capabilities, JSON drift or protected-deployment redirects; it never signs or sends actual settlements. Successful local fixture tests do **not** count as a post-Vercel live test. Retain the GitHub run URL and associated Vercel staging deployment commit as release evidence.
+
+At the time this workflow was added, **Vercel environment-variable inspection was not authorized** under the connected project's team scope. The workflow is not proof that a protected staging URL has been configured or that an actual Vercel deployment has been accepted. Issue #9 remains open until a real strict workflow run succeeds.
