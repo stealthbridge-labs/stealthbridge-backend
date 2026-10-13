@@ -2,15 +2,31 @@
 """Read-only post-deploy HTTP smoke validation; no transaction is submitted."""
 import argparse
 import json
+import os
+import re
 import sys
 import time
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request, build_opener, HTTPRedirectHandler
+from urllib.parse import urlsplit
+
+class BlockRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise ValueError("Staging API redirected instead of returning its own JSON response")
+
+def protected_headers():
+    headers={"Accept":"application/json"}
+    token=os.environ.get("STEALTHBRIDGE_VERCEL_BYPASS_TOKEN")
+    if token:
+        if len(token)>512 or not re.fullmatch(r"[A-Za-z0-9._~-]+",token):
+            raise ValueError("Invalid protected-deployment bypass secret format")
+        headers["x-vercel-protection-bypass"]=token
+    return headers
 
 def probe(origin, path, method="GET"):
-    request = Request(origin + path, method=method, headers={"Accept": "application/json"})
+    request = Request(origin + path, method=method, headers=protected_headers())
     try:
-        with urlopen(request, timeout=12) as response:
+        with build_opener(BlockRedirect()).open(request, timeout=12) as response:
             code, raw = response.status, response.read(65537)
     except HTTPError as error:
         code, raw = error.code, error.read(65537)
@@ -80,8 +96,11 @@ def main():
     if not 1 <= args.max_ledger_age_seconds <= 3600:
         parser.error("--max-ledger-age-seconds must be between 1 and 3600")
     origin = args.url.rstrip("/")
-    if not origin.startswith("https://") or "/" in origin[8:]:
-        parser.error("Only HTTPS staging API origins (without a path) are accepted")
+    parsed=urlsplit(origin)
+    if (parsed.scheme!="https" or not parsed.hostname or parsed.username is not None or
+            parsed.password is not None or parsed.path or parsed.query or parsed.fragment or
+            not parsed.port in (None,443)):
+        parser.error("Only HTTPS staging API origins without credentials, port, path or query are accepted")
     try:
         verify(origin, args.require_live_network, args.max_ledger_age_seconds)
     except (AssertionError, URLError, ValueError, TimeoutError) as error:
