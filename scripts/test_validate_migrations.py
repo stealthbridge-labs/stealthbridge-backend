@@ -10,7 +10,7 @@ SERVER=(ROOT/"src/server.rs").read_text()
 
 class MigrationSafetyTests(unittest.TestCase):
  def test_migrations_and_readiness_have_exact_parity(self):
-    self.assertEqual(validate_sources(FILES,SERVER),9)
+    self.assertEqual(validate_sources(FILES,SERVER),10)
  def test_missing_migration_is_rejected(self):
     with self.assertRaisesRegex(ValueError,"readiness migration manifest"):
      validate_sources(FILES[:-1],SERVER)
