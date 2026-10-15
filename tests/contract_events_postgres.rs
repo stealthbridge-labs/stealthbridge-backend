@@ -83,6 +83,29 @@ async fn event_journal_recovers_after_restarts_without_duplicate_or_conflicting_
  assert_eq!(completed.start_ledger,104);
  assert!(completed.cursor.is_none());
  assert_eq!(load_progress(&pool,contract,1).await.unwrap(),completed);
+ // A deterministic second PUBLIC metadata fixture exercises stable descending
+ // keyset pagination. It is never presented as a real Testnet transaction.
+ let second_id="0000000000000000101-0000000001";
+ sqlx::query("INSERT INTO stellar_contract_event_journal \\
+   (network,contract_id,event_id,transaction_hash,ledger_sequence) \\
+   VALUES ('testnet',$1,$2,$3,101)")
+    .bind(contract).bind(second_id).bind("b".repeat(64))
+    .execute(&pool).await.unwrap();
+ let first_page=stealthbridge_backend::ledger_events::read_activity(
+   &pool,&stealthbridge_backend::ledger_events::ActivityOptions{
+      limit:Some(1),contract_id:Some(contract.to_owned()),before:None,
+   }).await.unwrap();
+ assert_eq!(first_page.items.len(),1);
+ assert_eq!(first_page.items[0].id,second_id);
+ let after=first_page.next_cursor.expect("second page exists");
+ assert_eq!(after,format!("{second_id}.{contract}"));
+ let older=stealthbridge_backend::ledger_events::read_activity(
+   &pool,&stealthbridge_backend::ledger_events::ActivityOptions{
+      limit:Some(1),contract_id:Some(contract.to_owned()),before:Some(after),
+   }).await.unwrap();
+ assert_eq!(older.items.len(),1);
+ assert_eq!(older.items[0].id,id);
+ assert!(older.next_cursor.is_none());
  // Never store raw RPC topics, values, ciphertext or amount witnesses.
  let columns:Vec<String>=sqlx::query_scalar(
   "SELECT column_name FROM information_schema.columns WHERE table_name='stellar_contract_event_journal'")
