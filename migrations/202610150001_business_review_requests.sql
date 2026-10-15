@@ -38,4 +38,4 @@ CREATE INDEX business_records_by_tenant ON business_review_records
 COMMENT ON TABLE business_review_requests IS
  'Internal organization review configuration only. No authorization to execute financial settlement.';
 COMMENT ON TABLE business_review_records IS
- 'Append-only independent reviewer observations; DB application role must not be granted UPDATE or DELETE.';
+ 'Append-only independent reviewer observations; application database role must enforce append-only permissions.';
