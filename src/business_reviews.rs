@@ -116,6 +116,28 @@ pub async fn create_request(
     Ok(ReviewRegistration{id:prior_id,created:false})
 }
 
+/// Preferred entry point for trusted draft orchestration: compute the exact
+/// network/tenant/actor/action digest before storing it. The returned hash
+/// enables subsequent review lookups but carries no financial authority.
+pub async fn create_canonical_request(
+    pool: &PgPool,
+    identity: &VerifiedIdentity,
+    operation: crate::business_envelope::BusinessOperation,
+    reference: &str,
+    key: &str,
+    required_reviewers: u8,
+    now_unix: i64,
+    ttl_seconds: i64,
+) -> Result<(ReviewRegistration, [u8;32]), ReviewStoreError> {
+    let digest=crate::business_envelope::digest_business_envelope(
+        identity.organization,&identity.account,operation,reference,key
+    ).map_err(|_| ReviewStoreError::InvalidInput)?;
+    let registration=create_request(
+        pool,identity,key,digest,required_reviewers,now_unix,ttl_seconds
+    ).await?;
+    Ok((registration,digest))
+}
+
 /// This writes only a review observation after rechecking active tenant role
 /// under a row lock. Reviewer's trusted identity must originate from verified
 /// login/session middleware; never accept an arbitrary submitted reviewer name.
