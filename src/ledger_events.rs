@@ -1,7 +1,7 @@
 //! Bounded, opt-in public Stellar Testnet contract event journaling.
 //! NEVER store topics, values, proofs, private amounts or wallet data.
 //! getEvents event IDs are observer identifiers, NOT payment confirmations.
-use serde::Serialize;
+use serde::{Deserialize,Serialize};
 use serde_json::{json,Value};
 use sqlx::{PgPool,Row};
 
@@ -298,7 +298,8 @@ pub struct ActivityPage {
  pub items:Vec<ActivityEvent>,
  pub next_cursor:Option<String>,
 }
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActivityOptions {
  pub limit:Option<u32>,
  pub contract_id:Option<String>,
@@ -334,7 +335,7 @@ pub async fn read_activity(
 )->Result<ActivityPage,JournalError>{
  let limit=valid_activity_options(options)?;
  let cursors=sqlx::query(
-  "SELECT contract_id,next_start_ledger,EXTRACT(EPOCH FROM observed_at)::bigint AS observed_unix \\
+  "SELECT contract_id,next_start_ledger,EXTRACT(EPOCH FROM observed_at)::bigint AS observed_unix \
    FROM stellar_contract_event_cursors WHERE network='testnet' ORDER BY contract_id LIMIT 6")
    .fetch_all(pool).await?;
  if cursors.len()>MAX_CONTRACTS{return Err(JournalError::InvalidPage);}
@@ -352,11 +353,11 @@ pub async fn read_activity(
  }
  let before=options.before.as_deref().map(parse_public_cursor).transpose()?;
  let rows=sqlx::query(
-  "SELECT contract_id,event_id,transaction_hash,ledger_sequence, \\
-   EXTRACT(EPOCH FROM observed_at)::bigint AS observed_unix \\
-   FROM stellar_contract_event_journal WHERE network='testnet' \\
-   AND ($1::varchar IS NULL OR contract_id=$1) \\
-   AND ($2::varchar IS NULL OR (event_id,contract_id)<($2::varchar,$3::varchar)) \\
+  "SELECT contract_id,event_id,transaction_hash,ledger_sequence, \
+   EXTRACT(EPOCH FROM observed_at)::bigint AS observed_unix \
+   FROM stellar_contract_event_journal WHERE network='testnet' \
+   AND ($1::varchar IS NULL OR contract_id=$1) \
+   AND ($2::varchar IS NULL OR (event_id,contract_id)<($2::varchar,$3::varchar)) \
    ORDER BY event_id DESC,contract_id DESC LIMIT $4")
    .bind(options.contract_id.as_deref())
    .bind(before.map(|(id,_)|id))
