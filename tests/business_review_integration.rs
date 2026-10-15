@@ -5,7 +5,7 @@
 use sqlx::PgPool;
 use stealthbridge_backend::{
     business_reviews::{
-        create_request, create_canonical_request, read_review_count, record_review, ReviewStoreError,
+        create_request, create_canonical_request, read_review_count, record_review, CanonicalDraftRequest, ReviewStoreError,
     },
     org_auth::VerifiedIdentity,
     business_envelope::BusinessOperation,
@@ -144,8 +144,12 @@ async fn canonical_draft_digest_and_concurrent_reviewers_share_one_database_coun
     let org=Uuid::new_v4();
     fixture(&pool,org).await;
     let (request,digest)=create_canonical_request(
-        &pool,&identity(org,MAKER),BusinessOperation::InvoiceReview,
-        "INVOICE_001","canonical_business_request_0003",2,NOW,3_600
+        &pool,&identity(org,MAKER),CanonicalDraftRequest {
+            operation:BusinessOperation::InvoiceReview,
+            reference:"INVOICE_001",
+            key:"canonical_business_request_0003",
+            required_reviewers:2, now_unix:NOW, ttl_seconds:3_600,
+        }
     ).await.expect("canonical request");
     let a=identity(org,APPROVER_A);
     let b=identity(org,APPROVER_B);
