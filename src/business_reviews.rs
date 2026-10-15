@@ -52,7 +52,7 @@ async fn locked_membership(
     let role_name: Option<String> = sqlx::query_scalar(
         "SELECT m.role FROM organization_members m JOIN organizations o \
          ON o.id=m.organization_id WHERE m.organization_id=$1 AND m.subject=$2 \
-         AND m.revoked_at IS NULL AND o.status='active' FOR UPDATE OF m"
+         AND m.revoked_at IS NULL AND o.status='active' FOR UPDATE OF m,o"
     )
     .bind(identity.organization).bind(&identity.account)
     .fetch_optional(&mut **tx).await?;
