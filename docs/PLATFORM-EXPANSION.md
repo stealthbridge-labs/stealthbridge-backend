@@ -1,4 +1,4 @@
-# StealthBridge Platform Expansion — Version 1 Charter
+# StealthBridge Platform Expansion Charter
 
 **Status: architecture and SDK foundation only.** No payments, privacy proofs, payout providers, Testnet contract deployments, mainnet readiness, licensed operations or external partnerships are implied by this proposal.
 
