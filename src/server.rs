@@ -662,16 +662,18 @@ pub async fn run_ledger_observer(state:AppState) {
 /// The expected schema is deliberately versioned alongside the seven
 /// operator-run SQLx migrations. A successful TCP/SELECT 1 alone is not
 /// sufficient: the runtime must have its catalog and internal safeguards.
-const REQUIRED_SCHEMA_VERSIONS: [i64; 9] = [
+const REQUIRED_SCHEMA_VERSIONS: [i64; 10] = [
     202610080001, 202610080002, 202610080003, 202610080004,
     202610080005, 202610080006, 202610100001,
-    202610130001, 202610130002,
+    202610130001, 202610130002, 202610150001,
 ];
 
 async fn database_schema_ready(pool: &PgPool) -> bool {
     // No implicit migrations, modifications, or sensitive table reads.
     // SQLx success flags and essential relations are checked in one SELECT.
-    const QUERY: &str = "SELECT COUNT(*) = 9 \
+    const QUERY: &str = "SELECT COUNT(*) = 10 \
+         AND to_regclass('business_review_requests') IS NOT NULL \
+         AND to_regclass('business_review_records') IS NOT NULL \
          AND to_regclass('organization_login_challenges') IS NOT NULL \
          AND to_regclass('stellar_contract_event_cursors') IS NOT NULL \
          AND to_regclass('stellar_contract_event_journal') IS NOT NULL \
