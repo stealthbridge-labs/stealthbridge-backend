@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Validate nine SQLx migrations against deployed API readiness list
+      - name: Validate all SQLx migrations against deployed API readiness list
         run: python3 scripts/validate_migrations.py
       - name: Reject missing marker or unreviewed mutating SQL
         run: python3 -m unittest scripts/test_validate_migrations.py
