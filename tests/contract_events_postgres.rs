@@ -31,21 +31,21 @@ async fn event_journal_recovers_after_restarts_without_duplicate_or_conflicting_
  let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM stellar_contract_event_journal \
    WHERE network='testnet' AND contract_id=$1").bind(contract).fetch_one(&pool).await.unwrap();
  assert_eq!(count,1);
- let page=stealthbridge_backend::ledger_events::read_activity(
+ let activity_page=stealthbridge_backend::ledger_events::read_activity(
     &pool,&stealthbridge_backend::ledger_events::ActivityOptions{
        limit:Some(1),contract_id:Some(contract.to_owned()),before:None,
     }).await.expect("journal activity read");
- assert_eq!(page.network,"testnet");
- assert_eq!(page.source,"stored-public-testnet-metadata");
- assert_eq!(page.observation_status,"checkpoint-present");
- assert!(!page.payment_execution_enabled);
- assert_eq!(page.items.len(),1);
- assert_eq!(page.items[0].id,id);
- assert_eq!(page.items[0].contract_id,contract);
- assert_eq!(page.items[0].tx_hash,"a".repeat(64));
- assert!(page.contracts.iter().any(|c|c.contract_id==contract));
- assert!(page.next_cursor.is_none());
- let serialized=serde_json::to_string(&page).unwrap();
+ assert_eq!(activity_page.network,"testnet");
+ assert_eq!(activity_page.source,"stored-public-testnet-metadata");
+ assert_eq!(activity_page.observation_status,"checkpoint-present");
+ assert!(!activity_page.payment_execution_enabled);
+ assert_eq!(activity_page.items.len(),1);
+ assert_eq!(activity_page.items[0].id,id);
+ assert_eq!(activity_page.items[0].contract_id,contract);
+ assert_eq!(activity_page.items[0].tx_hash,"a".repeat(64));
+ assert!(activity_page.contracts.iter().any(|c|c.contract_id==contract));
+ assert!(activity_page.next_cursor.is_none());
+ let serialized=serde_json::to_string(&activity_page).unwrap();
  assert!(!serialized.contains("IN_MEMORY_ONLY_PRIVATE_PROOF_SHOULD_NEVER_BE_STORED"));
  assert!(!serialized.contains("IN_MEMORY_ONLY_CONFIDENTIAL_EVENT_VALUE"));
  let snapshot=stealthbridge_backend::ledger_events::diagnostics(&pool).await.unwrap();
