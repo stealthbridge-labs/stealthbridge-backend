@@ -1,0 +1,19 @@
+name: Read-only observer cross-repo source parity
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  read-only-observability:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      STEALTHBRIDGE_OBS_SDK_REF: 3bf69c478461958026839832627042bc3f1b9577
+      STEALTHBRIDGE_OBS_FRONTEND_REF: 733f6ee73c1b00d568f8904c46975f79fe060a80
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Reject observer and wallet/payment source drift using offline negative fixtures
+        run: python3 -m unittest scripts/test_verify_observation_pipeline.py
+      - name: Compare pinned SDK/front-end integrity logic and all five backend GET boundaries
+        run: python3 scripts/verify_observation_pipeline.py
