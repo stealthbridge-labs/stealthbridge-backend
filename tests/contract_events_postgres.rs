@@ -86,8 +86,8 @@ async fn event_journal_recovers_after_restarts_without_duplicate_or_conflicting_
  // A deterministic second PUBLIC metadata fixture exercises stable descending
  // keyset pagination. It is never presented as a real Testnet transaction.
  let second_id="0000000000000000101-0000000001";
- sqlx::query("INSERT INTO stellar_contract_event_journal \\
-   (network,contract_id,event_id,transaction_hash,ledger_sequence) \\
+ sqlx::query("INSERT INTO stellar_contract_event_journal \
+   (network,contract_id,event_id,transaction_hash,ledger_sequence) \
    VALUES ('testnet',$1,$2,$3,101)")
     .bind(contract).bind(second_id).bind("b".repeat(64))
     .execute(&pool).await.unwrap();
