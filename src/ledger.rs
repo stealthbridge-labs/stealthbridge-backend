@@ -19,6 +19,20 @@ pub struct LedgerCheckpoint {
     pub ledger_closed_at_unix: String,
     pub source: &'static str,
 }
+impl LedgerCheckpoint {
+    /// Check persisted values before exposing them as an actual public ledger
+    /// observation. A stale checkpoint is still a record, never a live claim.
+    pub fn validate_for_display(&self)->bool {
+        self.ledger_sequence>0 && self.ledger_sequence<=i64::MAX as u64 &&
+        self.ledger_hash.len()==64 &&
+        self.ledger_hash.bytes().all(|b|b.is_ascii_hexdigit()) &&
+        !self.ledger_closed_at_unix.is_empty() &&
+        self.ledger_closed_at_unix.len()<=20 &&
+        self.ledger_closed_at_unix.bytes().all(|b|b.is_ascii_digit()) &&
+        self.ledger_closed_at_unix.parse::<u64>().is_ok_and(|n|n>0) &&
+        self.source=="stellar-rpc"
+    }
+}
 #[derive(Debug, PartialEq, Eq)]
 pub enum CheckpointChange { Inserted, Advanced, Unchanged, Stale }
 #[derive(Debug)]
@@ -110,12 +124,19 @@ pub async fn last_head(pool:&PgPool)->Result<Option<LedgerCheckpoint>,sqlx::Erro
     match row {
         Some(row)=>{
             let ledger_sequence:i64=row.try_get("ledger_sequence")?;
-            Ok(Some(LedgerCheckpoint {
-                ledger_sequence: ledger_sequence as u64,
+            if ledger_sequence<=0 {
+                return Err(sqlx::Error::Decode("Invalid persisted ledger sequence".into()));
+            }
+            let checkpoint=LedgerCheckpoint {
+                ledger_sequence:ledger_sequence as u64,
                 ledger_hash:row.try_get("ledger_hash")?,
                 ledger_closed_at_unix:row.try_get("close_time_unix")?,
                 source:"stellar-rpc",
-            }))
+            };
+            if !checkpoint.validate_for_display(){
+                return Err(sqlx::Error::Decode("Invalid persisted observer checkpoint".into()));
+            }
+            Ok(Some(checkpoint))
         }
         None=>Ok(None),
     }
@@ -151,6 +172,23 @@ mod tests {
         assert!(release_observer_lease(&mut resumed).await.unwrap());
     }
 
+    #[test]
+    fn persisted_observer_checkpoints_are_never_trusted_without_validation(){
+        let good=LedgerCheckpoint{
+            ledger_sequence:44,
+            ledger_hash:"a".repeat(64),
+            ledger_closed_at_unix:"1760000020".into(),
+            source:"stellar-rpc",
+        };
+        assert!(good.validate_for_display());
+        for candidate in [
+            LedgerCheckpoint{ledger_sequence:0,..good.clone()},
+            LedgerCheckpoint{ledger_hash:"not-a-hash".into(),..good.clone()},
+            LedgerCheckpoint{ledger_closed_at_unix:"2026-10-15".into(),..good.clone()},
+            LedgerCheckpoint{ledger_closed_at_unix:"0".into(),..good.clone()},
+            LedgerCheckpoint{ledger_closed_at_unix:"99999999999999999999".into(),..good.clone()},
+        ]{assert!(!candidate.validate_for_display());}
+    }
     #[test]
     fn fails_closed_on_network_or_untrustworthy_hash() {
         assert!(fixture().validate().is_ok());
