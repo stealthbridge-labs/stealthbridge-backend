@@ -116,24 +116,32 @@ pub async fn create_request(
     Ok(ReviewRegistration{id:prior_id,created:false})
 }
 
+/// Explicit draft parameters make the trusted builder reviewable and avoid
+/// ambiguous positional arguments at the authorization boundary.
+pub struct CanonicalDraftRequest<'a> {
+    pub operation: crate::business_envelope::BusinessOperation,
+    pub reference: &'a str,
+    pub key: &'a str,
+    pub required_reviewers: u8,
+    pub now_unix: i64,
+    pub ttl_seconds: i64,
+}
+
 /// Preferred entry point for trusted draft orchestration: compute the exact
 /// network/tenant/actor/action digest before storing it. The returned hash
 /// enables subsequent review lookups but carries no financial authority.
 pub async fn create_canonical_request(
     pool: &PgPool,
     identity: &VerifiedIdentity,
-    operation: crate::business_envelope::BusinessOperation,
-    reference: &str,
-    key: &str,
-    required_reviewers: u8,
-    now_unix: i64,
-    ttl_seconds: i64,
+    request: CanonicalDraftRequest<'_>,
 ) -> Result<(ReviewRegistration, [u8;32]), ReviewStoreError> {
     let digest=crate::business_envelope::digest_business_envelope(
-        identity.organization,&identity.account,operation,reference,key
+        identity.organization,&identity.account,
+        request.operation,request.reference,request.key
     ).map_err(|_| ReviewStoreError::InvalidInput)?;
     let registration=create_request(
-        pool,identity,key,digest,required_reviewers,now_unix,ttl_seconds
+        pool,identity,request.key,digest,request.required_reviewers,
+        request.now_unix,request.ttl_seconds
     ).await?;
     Ok((registration,digest))
 }
