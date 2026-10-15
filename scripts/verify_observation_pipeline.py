@@ -22,7 +22,8 @@ def source_at(repo,sha,path):
     require(re.fullmatch(r"[a-f0-9]{40}",sha or "") is not None,
             "Reviewed source references must be exact 40-character Git commit IDs")
     require(repo in (SDK_REPO,FRONT_REPO),"Unsupported source repository")
-    require(not path.startswith("/") and ".." not in path,
+    require(not path.startswith("/") and "\\" not in path and
+            all(part not in ("", ".", "..") for part in path.split("/")),
             "Untrusted source path")
     url=f"https://raw.githubusercontent.com/{repo}/{sha}/{path}"
     request=Request(url,headers={"user-agent":"StealthBridge-source-contract-check/1.0"})
