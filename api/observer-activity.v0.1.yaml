@@ -1,0 +1,66 @@
+openapi: 3.1.0
+info:
+  title: StealthBridge Public Testnet Observer Activity Extension
+  version: 0.1.0
+  description: >
+    Additive preview-read extension to canonical API v0.3. Stored historical
+    PUBLIC contract event metadata only. No on-chain execution verification.
+paths:
+  /v1/observer/activity:
+    get:
+      operationId: observerActivity
+      summary: Read bounded public Testnet journal events and observed cursors
+      parameters:
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 25, default: 15}
+        - name: contract_id
+          in: query
+          schema: {type: string, pattern: '^C[A-Z2-7]{55}$'}
+        - name: before
+          in: query
+          description: Opaque keyset cursor returned by a previous activity page
+          schema: {type: string, maxLength: 87}
+      responses:
+        "200":
+          description: Historical public journal IDs, never transfer execution
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ActivityPage'}
+        "400": {description: Malformed query, contract ID or event cursor}
+        "503": {description: PostgreSQL not configured, schema unavailable or timed out}
+components:
+  schemas:
+    ActivityContract:
+      type: object
+      required: [contract_id, next_start_ledger, observed_at_unix]
+      properties:
+        contract_id: {type: string, pattern: '^C[A-Z2-7]{55}$'}
+        next_start_ledger: {type: integer, minimum: 1}
+        observed_at_unix: {type: string, pattern: '^[0-9]{1,20}$'}
+    ActivityEvent:
+      type: object
+      required: [id, contract_id, tx_hash, ledger_sequence, observed_at_unix]
+      properties:
+        id: {type: string, pattern: '^[0-9]{19}-[0-9]{10}$'}
+        contract_id: {type: string, pattern: '^C[A-Z2-7]{55}$'}
+        tx_hash: {type: string, pattern: '^[0-9a-f]{64}$'}
+        ledger_sequence: {type: integer, minimum: 1}
+        observed_at_unix: {type: string, pattern: '^[0-9]{1,20}$'}
+    ActivityPage:
+      type: object
+      required: [network, source, observation_status, payment_execution_enabled, contracts, items, next_cursor]
+      properties:
+        network: {type: string, const: testnet}
+        source: {type: string, const: stored-public-testnet-metadata}
+        observation_status: {type: string, enum: [no-checkpoint, checkpoint-present]}
+        payment_execution_enabled: {type: boolean, const: false}
+        contracts:
+          type: array
+          maxItems: 5
+          items: {$ref: '#/components/schemas/ActivityContract'}
+        items:
+          type: array
+          maxItems: 25
+          items: {$ref: '#/components/schemas/ActivityEvent'}
+        next_cursor: {type: [string, 'null']}

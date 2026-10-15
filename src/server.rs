@@ -527,6 +527,25 @@ async fn observer_head(
         .map(Json).ok_or(StatusCode::NOT_FOUND)
 }
 
+/// Recent *stored* public contract event IDs. Does not query live RPC, expose
+/// event XDR, infer private transfers or confirm settlement / fiat payout.
+async fn observer_activity(
+ State(state):State<Arc<AppState>>,
+ Query(options):Query<ledger_events::ActivityOptions>,
+)->Result<Json<ledger_events::ActivityPage>,StatusCode>{
+ ledger_events::valid_activity_options(&options)
+   .map_err(|_|StatusCode::BAD_REQUEST)?;
+ let pool=state.db.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+ tokio::time::timeout(Duration::from_secs(3),
+    ledger_events::read_activity(pool,&options)).await
+    .map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?
+    .map_err(|error|match error{
+      ledger_events::JournalError::InvalidPage |
+      ledger_events::JournalError::InvalidContract=>StatusCode::BAD_REQUEST,
+      _=>StatusCode::SERVICE_UNAVAILABLE,
+    }).map(Json)
+}
+
 /// Must be enabled explicitly with STEALTHBRIDGE_ENABLE_LEDGER_OBSERVER=true.
 /// Run one designated observer per environment to avoid redundant RPC polling.
 pub async fn run_ledger_observer(state:AppState) {
@@ -846,6 +865,7 @@ pub fn router(state: AppState) -> Router {
         .route("/internal/metrics",get(internal_metrics))
         .route("/v1/network",get(network))
         .route("/v1/observer",get(observer_head))
+        .route("/v1/observer/activity",get(observer_activity))
         .route("/v1/capabilities",get(capabilities))
         .route("/v1/contracts",get(contract_discovery))
         .route("/v1/corridors",get(corridors))
@@ -890,6 +910,27 @@ mod tests {
         assert!(!metrics.contains("stealthbridge_observer_public_events_stored"));
         assert!(!metrics.contains("contract_id"));
         assert!(!metrics.contains("transaction_hash"));
+    }
+
+    #[tokio::test]
+    async fn observer_activity_rejects_bad_filters_before_accessing_database(){
+        use tower::ServiceExt;
+        let app=router(AppState::without_db());
+        for uri in [
+           "/v1/observer/activity?limit=0",
+           "/v1/observer/activity?limit=26",
+           "/v1/observer/activity?contract_id=not-a-contract",
+           "/v1/observer/activity?before=untrusted",
+           "/v1/observer/activity?unexpected=anything",
+           "/v1/observer/activity?limit=2&limit=3",
+        ]{
+            let response=app.clone().oneshot(Request::builder().uri(uri)
+                .body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(),StatusCode::BAD_REQUEST,"{uri}");
+        }
+        let response=app.oneshot(Request::builder().uri("/v1/observer/activity")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(),StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]
