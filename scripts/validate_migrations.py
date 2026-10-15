@@ -9,8 +9,10 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 VERSION_RE=re.compile(r"^(\d{12})_[a-z0-9_]+\.sql$")
 SCHEMA_RE=re.compile(r"const REQUIRED_SCHEMA_VERSIONS: \[i64; (\d+)\] = \[([\s\S]*?)\];")
-ADDITIVE_ONLY=(202610130001,202610130002)
+ADDITIVE_ONLY=(202610130001,202610130002,202610150001)
 REQUIRED_TABLES=(
+    "business_review_requests",
+    "business_review_records",
     "organization_login_challenges",
     "stellar_contract_event_cursors",
     "stellar_contract_event_journal",
