@@ -12,3 +12,4 @@ pub mod ledger_events;
 pub mod platform;
 pub mod approval_policy;
 pub mod business_reviews;
+pub mod business_envelope;
