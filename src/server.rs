@@ -523,7 +523,11 @@ async fn observer_head(
     State(state):State<Arc<AppState>>,
 )->Result<Json<LedgerCheckpoint>,StatusCode>{
     let pool=state.db.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    ledger::last_head(pool).await.map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?
+    // A stale or corrupted persisted row is never promoted to a healthy
+    // observation. Bound the DB wait to protect stateless Vercel handlers.
+    tokio::time::timeout(Duration::from_secs(2),ledger::last_head(pool))
+        .await.map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?
+        .map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?
         .map(Json).ok_or(StatusCode::NOT_FOUND)
 }
 
@@ -861,6 +865,14 @@ pub fn router(state: AppState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn missing_database_never_fabricates_an_observer_ledger(){
+        use tower::ServiceExt;
+        let app=router(AppState::without_db());
+        let result=app.oneshot(Request::builder().uri("/v1/observer")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(result.status(),StatusCode::SERVICE_UNAVAILABLE);
+    }
     #[tokio::test]
     async fn sensitive_observer_metrics_are_hidden_without_operator_bearer() {
         use tower::ServiceExt;
