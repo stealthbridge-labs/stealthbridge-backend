@@ -10,3 +10,4 @@ pub mod wallet;
 pub mod org_auth;
 pub mod ledger_events;
 pub mod platform;
+pub mod approval_policy;
