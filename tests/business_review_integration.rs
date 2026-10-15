@@ -5,9 +5,10 @@
 use sqlx::PgPool;
 use stealthbridge_backend::{
     business_reviews::{
-        create_request, read_review_count, record_review, ReviewStoreError,
+        create_request, create_canonical_request, read_review_count, record_review, ReviewStoreError,
     },
     org_auth::VerifiedIdentity,
+    business_envelope::BusinessOperation,
 };
 use uuid::Uuid;
 
@@ -132,6 +133,37 @@ async fn persisted_reviews_are_tenant_scoped_idempotent_and_never_authorize_paym
 
     cleanup(&pool,org).await;
     cleanup(&pool,another).await;
+}
+
+
+#[tokio::test]
+async fn canonical_draft_digest_and_concurrent_reviewers_share_one_database_count() {
+    let url=std::env::var("DATABASE_URL").expect("CI PostgreSQL required");
+    let pool=PgPool::connect(&url).await.expect("connect");
+    sqlx::migrate!("./migrations").run(&pool).await.expect("migrations");
+    let org=Uuid::new_v4();
+    fixture(&pool,org).await;
+    let (request,digest)=create_canonical_request(
+        &pool,&identity(org,MAKER),BusinessOperation::InvoiceReview,
+        "INVOICE_001","canonical_business_request_0003",2,NOW,3_600
+    ).await.expect("canonical request");
+    let a=identity(org,APPROVER_A);
+    let b=identity(org,APPROVER_B);
+    let (first,second)=tokio::join!(
+        record_review(&pool,&a,request.id,digest,NOW+20),
+        record_review(&pool,&b,request.id,digest,NOW+20)
+    );
+    let first=first.expect("first concurrent reviewer");
+    let second=second.expect("second concurrent reviewer");
+    assert!(!first.financial_execution_authorized);
+    assert!(!second.financial_execution_authorized);
+    let counts=read_review_count(&pool,&identity(org,VIEWER),request.id)
+        .await.expect("stable count");
+    assert_eq!(counts.count,2);
+    assert_eq!(counts.remaining,0);
+    assert!(counts.review_count_met);
+    assert!(!counts.financial_execution_authorized);
+    cleanup(&pool,org).await;
 }
 
 #[tokio::test]
