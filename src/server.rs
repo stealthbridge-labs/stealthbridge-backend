@@ -867,6 +867,25 @@ pub fn router(state: AppState) -> Router {
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn platform_module_inventory_is_safe_get_only_metadata() {
+        use tower::ServiceExt;
+        let app=router(AppState::without_db());
+        let result=app.clone().oneshot(Request::builder().uri("/v1/platform/modules")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(result.status(),StatusCode::OK);
+        let body=to_bytes(result.into_body(),32_768).await.unwrap();
+        let value:Value=serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["product"],"StealthBridge");
+        assert_eq!(value["network"],"testnet");
+        assert_eq!(value["payment_execution_enabled"],false);
+        assert_eq!(value["privacy_verified"],false);
+        assert_eq!(value["mainnet_enabled"],false);
+        assert_eq!(value["modules"].as_array().unwrap().len(),11);
+        let post=app.oneshot(Request::builder().method("POST").uri("/v1/platform/modules")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(post.status(),StatusCode::METHOD_NOT_ALLOWED);
+    }
+    #[tokio::test]
     async fn missing_database_never_fabricates_an_observer_ledger(){
         use tower::ServiceExt;
         let app=router(AppState::without_db());
