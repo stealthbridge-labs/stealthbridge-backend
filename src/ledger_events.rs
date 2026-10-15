@@ -1,6 +1,7 @@
 //! Bounded, opt-in public Stellar Testnet contract event journaling.
 //! NEVER store topics, values, proofs, private amounts or wallet data.
 //! getEvents event IDs are observer identifiers, NOT payment confirmations.
+use serde::Serialize;
 use serde_json::{json,Value};
 use sqlx::{PgPool,Row};
 
@@ -271,6 +272,124 @@ pub async fn diagnostics(pool:&PgPool)->Result<JournalDiagnostics,sqlx::Error>{
  })
 }
 
+/// Historical *public* Testnet journal metadata only. These values are not
+/// on-chain execution receipts, verified private transfers or bank payouts.
+#[derive(Debug, Serialize)]
+pub struct ActivityContract {
+ pub contract_id:String,
+ pub next_start_ledger:i64,
+ pub observed_at_unix:String,
+}
+#[derive(Debug, Serialize)]
+pub struct ActivityEvent {
+ pub id:String,
+ pub contract_id:String,
+ pub tx_hash:String,
+ pub ledger_sequence:i64,
+ pub observed_at_unix:String,
+}
+#[derive(Debug, Serialize)]
+pub struct ActivityPage {
+ pub network:&'static str,
+ pub source:&'static str,
+ pub observation_status:&'static str,
+ pub payment_execution_enabled:bool,
+ pub contracts:Vec<ActivityContract>,
+ pub items:Vec<ActivityEvent>,
+ pub next_cursor:Option<String>,
+}
+#[derive(Debug, Default, Clone)]
+pub struct ActivityOptions {
+ pub limit:Option<u32>,
+ pub contract_id:Option<String>,
+ pub before:Option<String>,
+}
+fn parse_public_cursor(cursor:&str)->Result<(&str,&str),JournalError>{
+ let (id,contract)=cursor.split_once('.').ok_or(JournalError::InvalidPage)?;
+ if !valid_event_id(id)||!valid_contract_id(contract)||
+    cursor.len()!=id.len()+1+contract.len() {
+     return Err(JournalError::InvalidPage);
+ }
+ Ok((id,contract))
+}
+pub fn valid_activity_options(options:&ActivityOptions)->Result<u32,JournalError>{
+ let limit=options.limit.unwrap_or(15);
+ if !(1..=PAGE_LIMIT as u32).contains(&limit)||
+  options.contract_id.as_ref().is_some_and(|x|!valid_contract_id(x)){
+   return Err(JournalError::InvalidPage);
+ }
+ if let Some(before)=options.before.as_deref(){
+   let (_,cursor_contract)=parse_public_cursor(before)?;
+   if options.contract_id.as_deref().is_some_and(|c|c!=cursor_contract){
+     return Err(JournalError::InvalidPage);
+   }
+ }
+ Ok(limit)
+}
+/// One bounded page + at most five public cursor summaries. Use two prepared,
+/// deterministic queries and never materialize private event XDR/payloads.
+/// No RPC polling occurs in Vercel's request handling path.
+pub async fn read_activity(
+ pool:&PgPool,options:&ActivityOptions,
+)->Result<ActivityPage,JournalError>{
+ let limit=valid_activity_options(options)?;
+ let cursors=sqlx::query(
+  "SELECT contract_id,next_start_ledger,EXTRACT(EPOCH FROM observed_at)::bigint AS observed_unix \\
+   FROM stellar_contract_event_cursors WHERE network='testnet' ORDER BY contract_id LIMIT 6")
+   .fetch_all(pool).await?;
+ if cursors.len()>MAX_CONTRACTS{return Err(JournalError::InvalidPage);}
+ let mut contracts=Vec::with_capacity(cursors.len());
+ for row in cursors{
+   let id:String=row.try_get("contract_id")?;
+   let ledger:i64=row.try_get("next_start_ledger")?;
+   let timestamp:i64=row.try_get("observed_unix")?;
+   if !valid_contract_id(&id)||ledger<=0||timestamp<=0{
+     return Err(JournalError::InvalidPage);
+   }
+   contracts.push(ActivityContract{
+      contract_id:id,next_start_ledger:ledger,observed_at_unix:timestamp.to_string(),
+   });
+ }
+ let before=options.before.as_deref().map(parse_public_cursor).transpose()?;
+ let rows=sqlx::query(
+  "SELECT contract_id,event_id,transaction_hash,ledger_sequence, \\
+   EXTRACT(EPOCH FROM observed_at)::bigint AS observed_unix \\
+   FROM stellar_contract_event_journal WHERE network='testnet' \\
+   AND ($1::varchar IS NULL OR contract_id=$1) \\
+   AND ($2::varchar IS NULL OR (event_id,contract_id)<($2::varchar,$3::varchar)) \\
+   ORDER BY event_id DESC,contract_id DESC LIMIT $4")
+   .bind(options.contract_id.as_deref())
+   .bind(before.map(|(id,_)|id))
+   .bind(before.map(|(_,contract)|contract))
+   .bind(i64::from(limit)+1)
+   .fetch_all(pool).await?;
+ let has_more=rows.len()>limit as usize;
+ let mut items=Vec::with_capacity(limit as usize);
+ for row in rows.into_iter().take(limit as usize){
+  let id:String=row.try_get("event_id")?;
+  let contract_id:String=row.try_get("contract_id")?;
+  let tx_hash:String=row.try_get("transaction_hash")?;
+  let ledger_sequence:i64=row.try_get("ledger_sequence")?;
+  let observed:i64=row.try_get("observed_unix")?;
+  if !valid_event_id(&id)||!valid_contract_id(&contract_id)||
+     !valid_hash(&tx_hash)||ledger_sequence<=0||observed<=0||
+     !contracts.iter().any(|c|c.contract_id==contract_id){
+   return Err(JournalError::InvalidPage);
+  }
+  items.push(ActivityEvent{
+    id,contract_id,tx_hash,ledger_sequence,observed_at_unix:observed.to_string(),
+  });
+ }
+ let next_cursor=if has_more{
+   items.last().map(|event|format!("{}.{}",event.id,event.contract_id))
+ }else{None};
+ Ok(ActivityPage{
+  network:"testnet",source:"stored-public-testnet-metadata",
+  observation_status:if contracts.is_empty(){"no-checkpoint"}else{"checkpoint-present"},
+  payment_execution_enabled:false,contracts,items,next_cursor,
+ })
+}
+
 #[cfg(test)]
 mod tests{
  use super::*;
@@ -279,6 +398,27 @@ mod tests{
   json!({"id":id,"type":"contract","contractId":EXAMPLE_CONTRACT,
     "txHash":"a".repeat(64),"ledger":100,
     "topic":["AAAA"],"value":"NEVER_PERSIST_PRIVATE_EVENT_XDR"})
+ }
+ #[test]
+ fn activity_filters_and_cursor_validation_are_bounded(){
+  let contract=EXAMPLE_CONTRACT.to_owned();
+  assert_eq!(valid_activity_options(&ActivityOptions::default()).unwrap(),15);
+  let ok=ActivityOptions{
+    limit:Some(25),contract_id:Some(contract.clone()),
+    before:Some(format!("0000000000000000100-0000000001.{contract}")),
+  };
+  assert_eq!(valid_activity_options(&ok).unwrap(),25);
+  for candidate in [
+   ActivityOptions{limit:Some(0),..ActivityOptions::default()},
+   ActivityOptions{limit:Some(26),..ActivityOptions::default()},
+   ActivityOptions{contract_id:Some("C".repeat(56)),..ActivityOptions::default()},
+   ActivityOptions{before:Some("0000000000000000100-0000000001".into()),..ActivityOptions::default()},
+   ActivityOptions{before:Some(format!("0000000000000000100-0000000001.{contract}.evil")),..ActivityOptions::default()},
+   ActivityOptions{contract_id:Some(contract.clone()),
+     before:Some(format!("0000000000000000100-0000000001.{}", "C".repeat(56))),..ActivityOptions::default()},
+  ]{
+    assert!(valid_activity_options(&candidate).is_err());
+  }
  }
  #[test]
  fn validates_strkey_and_hard_bounds(){
