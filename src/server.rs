@@ -851,6 +851,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/network",get(network))
         .route("/v1/observer",get(observer_head))
         .route("/v1/capabilities",get(capabilities))
+        .route("/v1/platform/modules",get(crate::platform::platform_modules))
         .route("/v1/contracts",get(contract_discovery))
         .route("/v1/corridors",get(corridors))
         .route("/v1/corridors/page",get(corridor_page))
