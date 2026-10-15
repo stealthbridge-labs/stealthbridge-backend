@@ -78,6 +78,16 @@ paths:
           content:
             application/json:
               schema: {$ref: "#/components/schemas/Capabilities"}
+  /v1/platform/modules:
+    get:
+      operationId: platformModules
+      summary: Conservative product feature inventory; does not enable transactions
+      responses:
+        "200":
+          description: Read-only product scope and explicit unavailable features
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PlatformCatalog"}
   /v1/corridors:
     get:
       operationId: corridors
@@ -231,6 +241,29 @@ components:
         confidential_token_verified: {type: boolean}
         private_payments_verified: {type: boolean}
         fiat_payouts_enabled: {type: boolean}
+    PlatformModule:
+      type: object
+      required: [id, audiences, availability, description]
+      properties:
+        id: {type: string}
+        audiences:
+          type: array
+          items: {type: string, enum: [consumer, business, developer, partner]}
+        availability: {type: string, enum: [metadata-only, planned, blocked]}
+        description: {type: string}
+    PlatformCatalog:
+      type: object
+      required: [product, network, payment_execution_enabled, privacy_verified, mainnet_enabled, modules]
+      properties:
+        product: {type: string, const: StealthBridge}
+        network: {type: string, const: testnet}
+        payment_execution_enabled: {type: boolean, const: false}
+        privacy_verified: {type: boolean, const: false}
+        mainnet_enabled: {type: boolean, const: false}
+        modules:
+          type: array
+          maxItems: 11
+          items: {$ref: "#/components/schemas/PlatformModule"}
     LedgerCheckpoint:
       type: object
       required: [ledger_sequence, ledger_hash, ledger_closed_at_unix, source]
