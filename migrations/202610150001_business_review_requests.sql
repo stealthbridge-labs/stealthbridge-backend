@@ -1,7 +1,7 @@
 -- Internal, tenant-bound maker-checker audit storage. This is NOT a payout,
 -- financial settlement, or publicly exposed approval API.
 -- No organizations, members, draft requests or fictional payments are seeded.
-CREATE TABLE business_review_requests (
+CREATE TABLE IF NOT EXISTS business_review_requests (
     id UUID PRIMARY KEY,
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE RESTRICT,
     initiator VARCHAR(128) NOT NULL,
@@ -18,7 +18,7 @@ CREATE TABLE business_review_requests (
     UNIQUE (organization_id, id)
 );
 
-CREATE TABLE business_review_records (
+CREATE TABLE IF NOT EXISTS business_review_records (
     organization_id UUID NOT NULL,
     request_id UUID NOT NULL,
     reviewer VARCHAR(128) NOT NULL,
