@@ -55,7 +55,12 @@ async fn check_receipt(http:&Client,tx:&str,ledger:u64)->Result<(),()>{
  if v["hash"]!=tx||v["successful"]!=true||v["ledger"].as_u64()!=Some(ledger){return Err(());}
  Ok(())
 }
-pub async fn observe(http:&Client,network_ledger:u64,closed_at:&str)->Result<Value,()>{
+#[derive(Debug)]
+pub struct GovernanceReleaseUnavailable;
+impl From<()> for GovernanceReleaseUnavailable {
+ fn from(_:())->Self { Self }
+}
+pub async fn observe(http:&Client,network_ledger:u64,closed_at:&str)->Result<Value,GovernanceReleaseUnavailable>{
  let v:Value=serde_json::from_str(EVIDENCE).map_err(|_|())?;
  validate(&v)?;
  let c=&v["contracts"]["corridor-registry"];
