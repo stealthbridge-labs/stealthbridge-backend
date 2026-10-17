@@ -88,6 +88,37 @@ paths:
           content:
             application/json:
               schema: {$ref: "#/components/schemas/PlatformCatalog"}
+  /v1/business/reviews/{organization}/{request_id}:
+    get:
+      operationId: businessReviewStatus
+      summary: Authenticated tenant-scoped review counts, no financial permission
+      description: >-
+        Requires a short-lived, server-issued, network-bound organization read
+        session. Disabled without STEALTHBRIDGE_AUTH_DOMAIN and
+        STEALTHBRIDGE_SESSION_SECRET. Does not expose reviewer identities or
+        payment execution, and does not create review records.
+      security: [{OrganizationReadBearer: []}]
+      parameters:
+        - name: organization
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+        - name: request_id
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        "200":
+          description: Tenant-scoped stored reviewer count; never payment authorization
+          headers:
+            Cache-Control: {schema: {type: string, const: no-store}}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/BusinessReviewStatus"}
+        "401": {$ref: "#/components/responses/ApiError"}
+        "404": {$ref: "#/components/responses/ApiError"}
+        "429": {$ref: "#/components/responses/ApiError"}
+        "503": {$ref: "#/components/responses/ApiError"}
   /v1/corridors:
     get:
       operationId: corridors
@@ -180,6 +211,10 @@ paths:
         "501": {$ref: "#/components/responses/ApiError"}
 components:
   securitySchemes:
+    OrganizationReadBearer:
+      type: http
+      scheme: bearer
+      description: Signed, short-lived Testnet organization read session; no payment authority.
     MetricsBearer:
       type: http
       scheme: bearer
@@ -241,6 +276,18 @@ components:
         confidential_token_verified: {type: boolean}
         private_payments_verified: {type: boolean}
         fiat_payouts_enabled: {type: boolean}
+    BusinessReviewStatus:
+      type: object
+      required: [organization, request_id, review_count, remaining_reviewers, review_count_met, financial_execution_authorized, signatures_verified, source]
+      properties:
+        organization: {type: string, format: uuid}
+        request_id: {type: string, format: uuid}
+        review_count: {type: integer, minimum: 0, maximum: 4}
+        remaining_reviewers: {type: integer, minimum: 0, maximum: 4}
+        review_count_met: {type: boolean}
+        financial_execution_authorized: {type: boolean, const: false}
+        signatures_verified: {type: boolean, const: false}
+        source: {type: string, const: tenant-review-journal}
     PlatformModule:
       type: object
       required: [id, audiences, availability, description]
