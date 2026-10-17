@@ -11,7 +11,7 @@
 issuer G-addresses for disabled corridor candidates; exact metadata filtering
 on `GET /v1/corridors/page` by origin/destination and privacy-rail with
 bounded UUID keyset pages; Testnet RPC redirect and malformed-ledger rejection;
-and `/ready` verification of all nine SQLx migration markers, including login challenge and public event journal and required
+and `/ready` verification of all ten currently required SQLx migration markers, including login challenge and public event journal and required
 PostgreSQL tables (not merely a successful TCP connection).
 
 See [corridor catalog and migration-readiness operations](docs/CORRIDOR-CATALOG-OPERATIONS.md)
@@ -33,7 +33,7 @@ Future: authenticated sessions → signed approval → verified privacy rail
       → actual on-chain finality → independent provider payout → reconciliation
 ```
 
-**Implemented vs operational:** real SQLx migrations have been applied to managed Neon; code queries real enabled-corridor rows, and the CLI records new candidate corridors as **disabled**. Runtime reachability, credentials and production recovery must still be independently verified after deployments. A `GET /ready` response is infrastructure readiness only; even `200` must still report `payments=disabled`. The journal, exact-value arithmetic, role helpers and webhook protections are internal foundations, **not** authenticated public fund-moving services.
+**Implemented vs operational:** earlier SQLx migrations have been applied to managed Neon, but current source expects ten versions; verify each environment independently before treating it as ready. Code queries real enabled-corridor rows, and the CLI records new candidate corridors as **disabled**. Runtime reachability, credentials and production recovery must still be independently verified after deployments. A `GET /ready` response is infrastructure readiness only; even `200` must still report `payments=disabled`. The journal, exact-value arithmetic, role helpers and webhook protections are internal foundations, **not** authenticated public fund-moving services.
 
 **Next engineering milestones:** preserve evidence of a fresh Testnet RPC + Neon staging acceptance; establish a designated always-on observer rather than polling on every Vercel function; introduce challenge-based wallet authentication with short-lived nonce, origin/network binding and revocation; enforce tenant roles in database transactions; and consume independently attested three-contract addresses only after on-chain review.
 
@@ -121,3 +121,7 @@ A provider-neutral authenticated-notification verifier and PostgreSQL idempotent
 `GET /v1/contracts` serves the exact **undeployed** contract manifest from the Soroban repository as a read-only build snapshot, with `on_chain_verified=false` and `payment_execution_enabled=false`. CI compares the snapshot to the canonical upstream file; it fails on drift or an unverified deployment claim. The Vercel Rust adapter in `api/axum.rs` uses the same Axum routes as the local server. See [deployment notes](docs/DEPLOYMENT.md).
 
 The backend also includes the source-verified public registry method inventory, synchronized from `stealthbridge-contracts/integrations/public-soroban-interface.v1.json`. `GET /v1/contracts` returns this metadata as `public_interface`. It is documentation of public Soroban **source methods**, not confirmation that a contract ID exists or that its methods can currently be invoked.
+
+### Authenticated business review status
+
+`GET /v1/business/reviews/{organization}/{request_id}` is available only when trusted backend session-domain and secret configuration are present. It verifies signed, short-lived organization read sessions and live tenant membership, then reads stored counts with payment and signature verification explicitly false. The backend's session issuance flow is still internal; no public wallet login, business approval write, or funds-moving API has been enabled. See [Business read boundary](docs/BUSINESS-READ-BOUNDARY.md).
