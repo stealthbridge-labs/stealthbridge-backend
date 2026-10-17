@@ -1,6 +1,6 @@
 use axum::{
     body::{to_bytes,Body},
-    extract::{Path, Query, State}, http::{header,HeaderValue,Request,StatusCode},
+    extract::{Path, Query, State}, http::{header,HeaderMap,HeaderValue,Request,StatusCode},
     middleware::{from_fn,from_fn_with_state,Next}, response::{IntoResponse,Response}, routing::{get, post}, Json, Router,
 };
 use reqwest::Client;
@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::transaction::{self,TransactionObservation};
 use crate::ledger::{self, VerifiedHead, LedgerCheckpoint};
 use crate::ledger_events;
+use crate::{authz::Permission, business_reviews, org_auth};
 
 /// The only network accepted until privacy, compliance and security gates are satisfied.
 const TESTNET_PASSPHRASE: &str = "Test SDF Network ; September 2015";
@@ -82,7 +83,7 @@ async fn limit_public_rpc_reads(
     next:Next,
 )->Response {
     let path=request.uri().path();
-    let costly=path=="/v1/network" || path.starts_with("/v1/transactions/");
+    let costly=path=="/v1/network" || path.starts_with("/v1/transactions/") || path.starts_with("/v1/business/reviews/");
     if !costly || request.method()!=axum::http::Method::GET {
         return next.run(request).await;
     }
@@ -141,6 +142,8 @@ pub struct AppState {
     rpc_permits: Arc<Semaphore>,
     rpc_rate_limit: Arc<Mutex<PublicReadLimiter>>,
     metrics_token:Option<String>,
+    session_domain:Option<String>,
+    session_secret:Option<Arc<Vec<u8>>>,
     metrics:Arc<ReadinessMetrics>,
 }
 
@@ -188,9 +191,21 @@ impl AppState {
             _ => None,
         };
         let metrics_token=env::var("STEALTHBRIDGE_METRICS_TOKEN").ok().filter(|value|!value.is_empty());
+        // Authenticated reads are strictly opt-in. A partial or weak server-side
+        // auth configuration must fail startup instead of silently falling back.
+        let session_domain=env::var("STEALTHBRIDGE_AUTH_DOMAIN").ok().filter(|s|!s.is_empty());
+        let session_secret=env::var("STEALTHBRIDGE_SESSION_SECRET").ok().filter(|s|!s.is_empty());
+        if session_domain.is_some()!=session_secret.is_some()
+            || session_secret.as_ref().is_some_and(|s|s.len()<32)
+            || session_domain.as_ref().is_some_and(|s|s.len()>253 || !s.contains('.')
+                || !s.bytes().all(|b|b.is_ascii_lowercase() || b.is_ascii_digit() || b==b'.' || b==b'-'))
+        {
+            return Err("Trusted review auth requires domain and secret (>=32 bytes) together".into());
+        }
         Ok(Self {http,rpc_url,db,rpc_permits:Arc::new(Semaphore::new(MAX_IN_FLIGHT_RPC)),
             rpc_rate_limit:Arc::new(Mutex::new(PublicReadLimiter::new(configured_read_limit()?))),
-            metrics_token,metrics:Arc::new(ReadinessMetrics::default())})
+            metrics_token,session_domain,session_secret:session_secret.map(|s|Arc::new(s.into_bytes())),
+            metrics:Arc::new(ReadinessMetrics::default())})
     }
 
     #[cfg(test)]
@@ -202,6 +217,7 @@ impl AppState {
             rpc_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT_RPC)),
             rpc_rate_limit: Arc::new(Mutex::new(PublicReadLimiter::new(DEFAULT_RPC_READS_PER_MINUTE))),
             metrics_token:None,
+            session_domain:None, session_secret:None,
             metrics:Arc::new(ReadinessMetrics::default()),
         }
     }
@@ -844,6 +860,48 @@ async fn internal_metrics(State(state):State<Arc<AppState>>,headers:axum::http::
     Ok((StatusCode::OK,[(header::CONTENT_TYPE,HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"))],body))
 }
 
+/// Authenticated, tenant-bound, read-only review count. Never exposes a
+/// reviewer, a payment instruction, signature, or proof witness.
+async fn business_review_status(
+    State(state):State<Arc<AppState>>,
+    Path((organization,request_id)):Path<(Uuid,Uuid)>,
+    headers:HeaderMap,
+)->Response {
+    let (Some(pool),Some(domain),Some(secret))=(
+        state.db.as_ref(),state.session_domain.as_ref(),state.session_secret.as_ref()
+    ) else {return StatusCode::SERVICE_UNAVAILABLE.into_response();};
+    let Some(bearer)=headers.get(header::AUTHORIZATION).and_then(|h|h.to_str().ok())
+        .filter(|v|v.len()<=2048) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let now=SystemTime::now().duration_since(UNIX_EPOCH)
+        .map(|d|d.as_secs() as i64).unwrap_or(0);
+    let identity=org_auth::require_read_identity(
+        pool,bearer,secret.as_ref(),domain,organization,Permission::ReadAudit,now
+    ).await;
+    let identity=match identity {
+        Ok(value)=>value,
+        Err(org_auth::AuthError::Database(_))=>return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        Err(_)=>return StatusCode::UNAUTHORIZED.into_response(),
+    };
+    match business_reviews::read_review_count(pool,&identity,request_id).await {
+        Ok(review)=>(
+            [(header::CACHE_CONTROL,HeaderValue::from_static("no-store"))],
+            Json(json!({
+                "organization":organization,"request_id":request_id,
+                "review_count":review.count,"remaining_reviewers":review.remaining,
+                "review_count_met":review.review_count_met,
+                "financial_execution_authorized":false,
+                "signatures_verified":false,
+                "source":"tenant-review-journal"
+            }))
+        ).into_response(),
+        Err(business_reviews::ReviewStoreError::NotFound)=>StatusCode::NOT_FOUND.into_response(),
+        Err(business_reviews::ReviewStoreError::Unauthorized)=>StatusCode::UNAUTHORIZED.into_response(),
+        Err(_)=>StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
 pub fn router(state: AppState) -> Router {
     let state=Arc::new(state);
     Router::new()
@@ -854,6 +912,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/observer",get(observer_head))
         .route("/v1/capabilities",get(capabilities))
         .route("/v1/platform/modules",get(crate::platform::platform_modules))
+        .route("/v1/business/reviews/{organization}/{request_id}",get(business_review_status))
         .route("/v1/contracts",get(contract_discovery))
         .route("/v1/corridors",get(corridors))
         .route("/v1/corridors/page",get(corridor_page))
