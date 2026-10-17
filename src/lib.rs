@@ -13,3 +13,4 @@ pub mod platform;
 pub mod approval_policy;
 pub mod business_reviews;
 pub mod business_envelope;
+pub mod protocol_upgrade;
