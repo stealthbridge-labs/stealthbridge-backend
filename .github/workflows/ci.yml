@@ -50,6 +50,10 @@ jobs:
           STEALTHBRIDGE_SDK_REF: 437b5b23dd90cdad710318c22590c1edcf208e04
           STEALTHBRIDGE_FRONTEND_REF: 5de5b9ef7eb81406acfc35afc35741cf173ed4af
         run: python3 scripts/verify_consumer_contracts.py
+      - name: Check real deployed governance evidence against reviewed contracts commit
+        run: |
+          python3 -m unittest scripts/test_check_governance_release.py
+          python3 scripts/check_governance_release.py
       - name: Verify deployment snapshot matches pinned undeployed contracts source
         env:
           STEALTHBRIDGE_CONTRACTS_REF: 4c01631028bde15385a0e73e39c5c635dca17b35
