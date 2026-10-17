@@ -928,6 +928,18 @@ pub fn router(state: AppState) -> Router {
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn review_status_unconfigured_fails_closed_without_exposing_org_data() {
+        use tower::ServiceExt;
+        let app=router(AppState::without_db());
+        let uri=format!("/v1/business/reviews/{}/{}",Uuid::new_v4(),Uuid::new_v4());
+        let no_auth=app.clone().oneshot(Request::builder().uri(&uri)
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(no_auth.status(),StatusCode::SERVICE_UNAVAILABLE);
+        let no_write=app.oneshot(Request::builder().method("POST").uri(&uri)
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(no_write.status(),StatusCode::METHOD_NOT_ALLOWED);
+    }
+    #[tokio::test]
     async fn platform_module_inventory_is_safe_get_only_metadata() {
         use tower::ServiceExt;
         let app=router(AppState::without_db());
