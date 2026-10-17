@@ -928,6 +928,70 @@ pub fn router(state: AppState) -> Router {
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn signed_tenant_review_reads_hide_identity_and_respect_revocation() {
+        use tower::ServiceExt;
+        let db_url=std::env::var("DATABASE_URL").expect("CI postgres");
+        let pool=PgPool::connect(&db_url).await.expect("CI pool");
+        sqlx::migrate!("./migrations").run(&pool).await.expect("schema");
+        let org=Uuid::new_v4();
+        let wallet="GAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB7JZX";
+        sqlx::query("INSERT INTO organizations (id,display_name,status) VALUES ($1,'CI_ONLY_REVIEW','active')")
+            .bind(org).execute(&pool).await.expect("tenant");
+        sqlx::query("INSERT INTO organization_members (organization_id,subject,role) VALUES ($1,$2,'owner')")
+            .bind(org).bind(wallet).execute(&pool).await.expect("member");
+        let now=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let domain="staging.stealthbridge.example";
+        let identity=org_auth::VerifiedIdentity{
+            organization:org,account:wallet.into(),domain:domain.into(),
+            authenticated_at_unix:now,
+        };
+        let draft=business_reviews::create_request(
+            &pool,&identity,"ci_auth_review_status_001",[5;32],2,now,3600
+        ).await.expect("internal draft");
+        let secret=b"CI-only-unguessable-review-read-session-secret-key-11111";
+        let bearer=org_auth::issue_read_session(&identity,secret).unwrap();
+        let mut state=AppState::without_db();
+        state.db=Some(pool.clone());
+        state.session_domain=Some(domain.into());
+        state.session_secret=Some(Arc::new(secret.to_vec()));
+        let app=router(state);
+        let path=format!("/v1/business/reviews/{}/{}",org,draft.id);
+        let denied=app.clone().oneshot(Request::builder().uri(&path)
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(denied.status(),StatusCode::UNAUTHORIZED);
+        let response=app.clone().oneshot(Request::builder().uri(&path)
+            .header(header::AUTHORIZATION,format!("Bearer {bearer}"))
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(),StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL],"no-store");
+        let bytes=to_bytes(response.into_body(),8192).await.unwrap();
+        let data:Value=serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(data["review_count"],0);
+        assert_eq!(data["remaining_reviewers"],2);
+        assert_eq!(data["financial_execution_authorized"],false);
+        assert_eq!(data["signatures_verified"],false);
+        assert!(data.get("reviewer").is_none());
+        assert!(data.get("initiator").is_none());
+        let foreign=app.clone().oneshot(Request::builder().uri(
+            format!("/v1/business/reviews/{}/{}",Uuid::new_v4(),draft.id))
+            .header(header::AUTHORIZATION,format!("Bearer {bearer}"))
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(foreign.status(),StatusCode::UNAUTHORIZED);
+        sqlx::query("UPDATE organization_members SET revoked_at=now() WHERE organization_id=$1 AND subject=$2")
+            .bind(org).bind(wallet).execute(&pool).await.expect("revoke");
+        let revoked=app.oneshot(Request::builder().uri(&path)
+            .header(header::AUTHORIZATION,format!("Bearer {bearer}"))
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(revoked.status(),StatusCode::UNAUTHORIZED);
+        sqlx::query("DELETE FROM business_review_requests WHERE organization_id=$1")
+            .bind(org).execute(&pool).await.expect("cleanup draft");
+        sqlx::query("DELETE FROM organization_members WHERE organization_id=$1")
+            .bind(org).execute(&pool).await.expect("cleanup member");
+        sqlx::query("DELETE FROM organizations WHERE id=$1")
+            .bind(org).execute(&pool).await.expect("cleanup tenant");
+    }
+
+    #[tokio::test]
     async fn review_status_unconfigured_fails_closed_without_exposing_org_data() {
         use tower::ServiceExt;
         let app=router(AppState::without_db());
