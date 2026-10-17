@@ -22,7 +22,7 @@ fn decode_base64(s:&str)->Result<Vec<u8>,()>{
  let b=s.as_bytes();
  if b.is_empty()||b.len()>65_536||!b.len().is_multiple_of(4){return Err(());}
  let mut out=Vec::with_capacity(b.len()/4*3);
- for (i,block) in b.chunks_exact(4).enumerate(){
+ for (i,block) in b.as_chunks::<4>().0.iter().enumerate(){
   let last=i+1==b.len()/4;
   let padding=usize::from(block[3]==b'=')+usize::from(block[2]==b'=');
   if (padding!=0&&!last)||padding>2|| (block[2]==b'='&&block[3]!=b'='){return Err(());}
