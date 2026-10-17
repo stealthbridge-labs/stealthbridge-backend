@@ -56,31 +56,34 @@ fn hex32(bytes:&[u8])->Result<String,()>{
 fn executable_hash(value:&str,expected_ledger_key:&str)->Result<String,()>{
  let data=decode_base64(value)?;
  let ledger_key=decode_base64(expected_ledger_key)?;
- if ledger_key.len()!=48||data.len()<92||data.len()>48_000{return Err(());}
+ if ledger_key.len()!=48||data.len()<96||data.len()>48_000{return Err(());}
  for (offset,tag) in [(0,6),(4,0),(8,1),(44,20),(48,1),(52,19),(56,0)]{
   if u32_at(&data,offset)?!=tag{return Err(());}
  }
  if data.get(12..44)!=ledger_key.get(8..40){return Err(());}
- if u32_at(&data,92-4)?>1{return Err(());}
+ if u32_at(&data,92)?>1{return Err(());}
  hex32(data.get(60..92).ok_or(())?)
 }
 /// Public RPC supports sparse results for expired/absent ledger entries.
 /// Require all three and an observed ledger consistent with a fresh Testnet network
 /// head; fail closed on any missing/malformed/repeated/wrong-key instance.
-pub fn assess(reply:&Value,expected_network_ledger:u64)->Result<Value,()>{
+#[derive(Debug)]
+pub struct CodeObservationUnavailable;
+impl From<()> for CodeObservationUnavailable {fn from(_:())->Self{Self}}
+pub fn assess(reply:&Value,expected_network_ledger:u64)->Result<Value,CodeObservationUnavailable>{
  let ledger=reply["latestLedger"].as_u64().ok_or(())?;
- if ledger==0||ledger.abs_diff(expected_network_ledger)>15{return Err(());}
+ if ledger==0||ledger.abs_diff(expected_network_ledger)>15{return Err(CodeObservationUnavailable);}
  let entries=reply["entries"].as_array().ok_or(())?;
- if entries.len()!=3{return Err(());}
+ if entries.len()!=3{return Err(CodeObservationUnavailable);}
  let mut results=Vec::new();
  let mut all=true;
  for (name,id,key,release_hash) in EXPECTED{
   let matches:Vec<&Value>=entries.iter().filter(|v|v["key"]==key).collect();
-  if matches.len()!=1{return Err(());}
+  if matches.len()!=1{return Err(CodeObservationUnavailable);}
   let e=matches[0];
   let last=e["lastModifiedLedgerSeq"].as_u64().ok_or(())?;
   let expires=e["liveUntilLedgerSeq"].as_u64().ok_or(())?;
-  if last==0||last>ledger||expires<ledger{return Err(());}
+  if last==0||last>ledger||expires<ledger{return Err(CodeObservationUnavailable);}
   let current=executable_hash(e["xdr"].as_str().ok_or(())?,key)?;
   let unchanged=current==release_hash;
   all&=unchanged;
