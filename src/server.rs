@@ -83,7 +83,7 @@ async fn limit_public_rpc_reads(
     next:Next,
 )->Response {
     let path=request.uri().path();
-    let costly=path=="/v1/network" || path.starts_with("/v1/transactions/") || path.starts_with("/v1/business/reviews/");
+    let costly=path=="/v1/governance/release" || path=="/v1/network" || path.starts_with("/v1/transactions/") || path.starts_with("/v1/business/reviews/");
     if !costly || request.method()!=axum::http::Method::GET {
         return next.run(request).await;
     }
@@ -402,6 +402,18 @@ async fn contract_discovery() -> Result<Json<ContractDiscovery>,StatusCode> {
     }))
 }
 
+/// Check published deployment receipts through Testnet Horizon after fresh
+/// independently verified Stellar RPC ledger/network identification.
+async fn governance_release(State(state):State<Arc<AppState>>)->Result<Json<Value>,StatusCode>{
+ let n=state.network().await.map_err(|_|StatusCode::BAD_GATEWAY)?;
+ let closed:u64=n.ledger_closed_at_unix.parse().map_err(|_|StatusCode::BAD_GATEWAY)?;
+ let now=SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_|StatusCode::BAD_GATEWAY)?.as_secs();
+ if closed>now.saturating_add(30)||now.saturating_sub(closed)>180{
+  return Err(StatusCode::SERVICE_UNAVAILABLE);
+ }
+ crate::governance_release::observe(&state.http,n.ledger_sequence,&n.ledger_closed_at_unix)
+  .await.map(Json).map_err(|_|StatusCode::BAD_GATEWAY)
+}
 async fn capabilities() -> Json<Capabilities> {
     // No real payment handlers or privacy verifications have been implemented.
     // These flags remain false until code and independently reproducible evidence exist.
@@ -914,6 +926,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/platform/modules",get(crate::platform::platform_modules))
         .route("/v1/business/reviews/{organization}/{request_id}",get(business_review_status))
         .route("/v1/contracts",get(contract_discovery))
+        .route("/v1/governance/release",get(governance_release))
         .route("/v1/corridors",get(corridors))
         .route("/v1/corridors/page",get(corridor_page))
         .route("/v1/corridors/{id}",get(corridor_by_id))

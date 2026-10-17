@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 2,
+  "recordType": "soroban-testnet-governance-deployment-observation",
+  "network": "testnet",
+  "networkPassphrase": "Test SDF Network ; September 2015",
+  "sourceCommit": "130c577ef6f44412a249d43e3e459cedecb5c970",
+  "deployedAt": "2026-10-17",
+  "deployer": "GC3YRVLB7IN7SNUYVWFUC6OD3QWJXCUZ4HOBNIPVGY7BZDVOYMDNX5TN",
+  "administrator": "GC3YRVLB7IN7SNUYVWFUC6OD3QWJXCUZ4HOBNIPVGY7BZDVOYMDNX5TN",
+  "contracts": {
+    "corridor-registry": {
+      "contractId": "CDS6HBE6YJSZTRG3VR2HLCNHWJZMKB43BLFFEHEH3Z76WXAF46LW7JOB",
+      "wasmSha256": "588d17f99850272f2f18e6ee407d94329b4f8ae415c2f6b71993cf59f4139099",
+      "abiSha256": "727ab656c23f1dd52fbcd194b5bbb184e0627c7e2d94d77f2e7945c11d76bec1",
+      "wasmUploadTx": "43831300c653b110b83a8d5074c33337bb98819ef83d889e727eab7b96965d48",
+      "deploymentTx": "0ac4094247fd50872d079c9637b0975f825f99574e6722c9c69739d8c5c143e5",
+      "deploymentLedger": 5244269,
+      "readbackWasmMatches": true,
+      "observedAdmin": "GC3YRVLB7IN7SNUYVWFUC6OD3QWJXCUZ4HOBNIPVGY7BZDVOYMDNX5TN",
+      "observedPaused": false
+    },
+    "policy-registry": {
+      "contractId": "CBXWEA5PMDTBN5AN7FJYGGAPIWLRKXYHWLVWG5WOXH3HSRDB4RYTJBN5",
+      "wasmSha256": "856186ba3dca1feff010c670bd1ae9818bf69e284304273f943745603b9a7912",
+      "abiSha256": "5a21c448c76903b26116807b181c92bb8cbc2882e85c410aac301e5c7a72e072",
+      "wasmUploadTx": "b6b447f587be6d4e0446f5666165cb8b947be415522e76bc61d32626f0c9e428",
+      "deploymentTx": "34c2e84cad5be5181b7e1964d4e48e2c26ca021583373922f821c0038abce118",
+      "deploymentLedger": 5244283,
+      "readbackWasmMatches": true,
+      "observedAdmin": "GC3YRVLB7IN7SNUYVWFUC6OD3QWJXCUZ4HOBNIPVGY7BZDVOYMDNX5TN",
+      "observedPaused": false
+    },
+    "governance-gate": {
+      "contractId": "CD2KIMDRYJMKGO5SMIBOQP6ADPW5I4THNZFGXWYLIPGSXAI5NRXVAPKV",
+      "wasmSha256": "66b40fe5ee4f704a91acf39922ed130cc1eb4fc0cdc3c5ee5a30614921f4aa81",
+      "abiSha256": "917f0d13c5373d7f33aa56e8e1760025337a791166e83fec788a0c27a2e5b3e1",
+      "wasmUploadTx": "93d0625fa98862a76ae9156400eb0eba16a9d57a8a079301b94acb6f0da37802",
+      "deploymentTx": "9468801411a6bbb7fb2966c0225057bb4f3c8a7113aa687c0a0be744a7c5b341",
+      "deploymentLedger": 5244293,
+      "readbackWasmMatches": true,
+      "observedAdmin": "GC3YRVLB7IN7SNUYVWFUC6OD3QWJXCUZ4HOBNIPVGY7BZDVOYMDNX5TN",
+      "observedCorridorRegistry": "CDS6HBE6YJSZTRG3VR2HLCNHWJZMKB43BLFFEHEH3Z76WXAF46LW7JOB",
+      "observedPolicyRegistry": "CBXWEA5PMDTBN5AN7FJYGGAPIWLRKXYHWLVWG5WOXH3HSRDB4RYTJBN5"
+    }
+  },
+  "scope": {
+    "governanceDeployed": true,
+    "privacyVerified": false,
+    "paymentExecutionEnabled": false,
+    "platformFeesEnabled": false,
+    "fiatPayoutEnabled": false
+  },
+  "verification": {
+    "sourceWasmBuildReproducible": true,
+    "onchainWasmReadbackChecked": true,
+    "onchainConstructorStateReadbackChecked": true,
+    "deploymentTransactionsConfirmedInTestnetHorizon": true,
+    "independentExternalAuditCompleted": false
+  },
+  "notes": "Observed via Stellar CLI 27.1.0 and public Testnet Horizon after authorized local-signer deployment; no private keys recorded. This record is separate from legacy v1 canonical manifest pending reviewed 3-contract schema adoption. Static JSON is not a replacement for fresh RPC reads or security audit."
+}
