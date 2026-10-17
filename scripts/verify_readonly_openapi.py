@@ -13,6 +13,7 @@ METHOD = re.compile(r"^    (get|post|put|patch|delete):\s*$")
 ROUTE = re.compile(r"^  (/[^\s:]+):\s*$")
 ALLOWED = {"/health", "/ready", "/internal/metrics", "/v1/observer",
            "/v1/network", "/v1/contracts", "/v1/capabilities", "/v1/platform/modules",
+           "/v1/business/reviews/{organization}/{request_id}",
            "/v1/corridors", "/v1/corridors/page", "/v1/corridors/{id}",
            "/v1/transactions/{hash}", "/v1/settlements"}
 
