@@ -197,6 +197,24 @@ fn verify_session_claims(token:&str,secret:&[u8],domain:&str,now:i64)
  Ok(claims)
 }
 
+/// Resolve an authenticated session to a tenant-bound identity. A trusted
+/// configured domain and secret are required; no submitted request field may
+/// override either. Active membership is rechecked on every invocation.
+pub async fn require_read_identity(
+ pool:&PgPool,bearer:&str,secret:&[u8],trusted_domain:&str,
+ organization:Uuid,permission:Permission,now_unix:i64,
+)->Result<VerifiedIdentity,AuthError>{
+ let token=bearer.strip_prefix("Bearer ").ok_or(AuthError::Unauthorized)?;
+ let claims=verify_session_claims(token,secret,trusted_domain,now_unix)?;
+ if claims.organization!=organization{return Err(AuthError::Unauthorized);}
+ authz::authorize_member(pool,organization,&claims.account,permission).await
+   .map_err(|_|AuthError::Unauthorized)?;
+ Ok(VerifiedIdentity{
+  organization:claims.organization,account:claims.account,domain:claims.domain,
+  authenticated_at_unix:claims.issued_at_unix,
+ })
+}
+
 /// Middleware-ready tenant-scoped guard for *future read-only* routes. The
 /// server MUST supply the expected tenant from a trusted route and the
 /// domain/secret from trusted config, not from user-submitted headers.
