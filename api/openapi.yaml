@@ -57,6 +57,46 @@ paths:
               schema: {$ref: "#/components/schemas/NetworkStatus"}
         "429": {$ref: "#/components/responses/ApiError"}
         "502": {$ref: "#/components/responses/ApiError"}
+  /v1/governance/snapshot:
+    get:
+      operationId: governanceSnapshot
+      summary: Same-ledger public Testnet governance snapshot (not payment authority)
+      description: >
+        Combines one validated getLedgerEntries response for three pinned Soroban
+        contract-instance code/admin observations with public historical Horizon
+        deployment receipts. The legacy canonical manifest remains unapproved.
+      responses:
+        "200":
+          description: Read-only evidence; execution, fees, privacy and signer custody remain unverified
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [schema_version, network, source, state, reason,
+                  observed_ledger_sequence, observed_network_head_closed_at_unix,
+                  release, code, administrators, canonical_manifest_attested,
+                  signer_possession_verified, trusted_for_execution, privacy_verified,
+                  payment_execution_enabled, fee_collection_enabled]
+                properties:
+                  schema_version: {type: integer, const: 1}
+                  network: {type: string, const: testnet}
+                  source: {type: string, const: "stellar-rpc+stellar-horizon"}
+                  state: {type: string, enum: [consistent-observations, unverified]}
+                  reason: {type: string, maxLength: 220}
+                  observed_ledger_sequence: {type: integer, minimum: 5244293}
+                  observed_network_head_closed_at_unix: {type: string, pattern: "^[0-9]+$"}
+                  release: {type: object}
+                  code: {type: object}
+                  administrators: {type: object}
+                  canonical_manifest_attested: {type: boolean, const: false}
+                  signer_possession_verified: {type: boolean, const: false}
+                  trusted_for_execution: {type: boolean, const: false}
+                  privacy_verified: {type: boolean, const: false}
+                  payment_execution_enabled: {type: boolean, const: false}
+                  fee_collection_enabled: {type: boolean, const: false}
+        "429": {$ref: "#/components/responses/ApiError"}
+        "502": {$ref: "#/components/responses/ApiError"}
+        "503": {$ref: "#/components/responses/ApiError"}
   /v1/contracts:
     get:
       operationId: contractDiscovery
