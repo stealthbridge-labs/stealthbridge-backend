@@ -33,7 +33,8 @@ Next.js preview / typed SDK
 Rust/Axum Testnet API ───► Stellar RPC (network identity, ledger, tx status)
       │
       ├──► Neon PostgreSQL (organizations, corridors, journal, checkpoints)
-      ├──► source-only Soroban ABI + not-deployed manifest
+      ├──► legacy source-only Soroban ABI + v1 not-deployed manifest (not chain reality)
+      ├──► public Testnet governance receipts, executable hashes and administrator reads
       └──x financial execution (returns disabled)
 Future: authenticated sessions → signed approval → verified privacy rail
       → actual on-chain finality → independent provider payout → reconciliation
@@ -124,7 +125,7 @@ A provider-neutral authenticated-notification verifier and PostgreSQL idempotent
 
 ## Inter-repository Testnet contract discovery
 
-`GET /v1/contracts` serves the exact **undeployed** contract manifest from the Soroban repository as a read-only build snapshot, with `on_chain_verified=false` and `payment_execution_enabled=false`. CI compares the snapshot to the canonical upstream file; it fails on drift or an unverified deployment claim. The Vercel Rust adapter in `api/axum.rs` uses the same Axum routes as the local server. See [deployment notes](docs/DEPLOYMENT.md).
+`GET /v1/contracts` serves the exact **legacy v1 not-deployed** integration manifest from the Soroban repository as a read-only build snapshot, not a statement about the three already deployed public governance contracts, with `on_chain_verified=false` and `payment_execution_enabled=false`. CI compares the snapshot to the canonical upstream file; it fails on drift or an unverified deployment claim. The Vercel Rust adapter in `api/axum.rs` uses the same Axum routes as the local server. See [deployment notes](docs/DEPLOYMENT.md).
 
 The backend also includes the source-verified public registry method inventory, synchronized from `stealthbridge-contracts/integrations/public-soroban-interface.v1.json`. `GET /v1/contracts` returns this metadata as `public_interface`. It is documentation of public Soroban **source methods**, not confirmation that a contract ID exists or that its methods can currently be invoked.
 
