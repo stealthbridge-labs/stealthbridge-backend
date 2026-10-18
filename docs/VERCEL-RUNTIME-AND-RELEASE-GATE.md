@@ -6,6 +6,28 @@ The `stealthbridge-backend` Vercel **production** deployment and multiple READY 
 
 **Conclusion:** the application is **not live-healthy**. Neither an exact failure cause nor a solution is verified. The evidence narrows the search toward Vercel function invocation, packaging, runtime initialization or project configuration rather than governance API business logic. Do not promote these previews or declare the product connected until direct API requests respond.
 
+## Node.js control probe (diagnostic only)
+
+A single **Node.js control function** is available at `GET /__runtime_node_probe`.
+It does not call a backend API or touch the Stellar network, wallets, Neon or
+credentials. Its success means **only** that a Node function can run within the
+same Vercel project. It must never be used for deployment readiness.
+
+Compare exactly these three routes on the same deployment:
+
+| Route | Meaning of success | Meaning of failure |
+| --- | --- | --- |
+| `GET /__runtime_node_probe` | Node runtime invocation works | Project-wide function/routing problem is plausible |
+| `GET /__runtime_probe` | Minimal independent Rust function can start | Rust runtime/builder/packaging needs inspection |
+| `GET /health` | Axum process is responding (not ledger-ready) | Rust process/bootstrap may be down |
+
+If Node works but both Rust endpoints fail with `INTERNAL_FUNCTION_INVOCATION_FAILED`,
+escalate the Rust runtime/build artifact and region-level invocation to Vercel
+with the request IDs. If all three fail, investigate deployment output and
+function routing/environment before changing product code. An HTTP 200 from the
+Node control **must not** cause frontend health screens, CI release gates or
+operator reports to mark the backend healthy.
+
 ## Safe investigation and operator handoff
 
 1. In Vercel, open **stealthbridge-backend → Deployments → latest production deployment → Functions / Runtime Logs**. Invoke `GET /health` and correlate the exact `x-vercel-id` request ID with the deployment. Check platform initialization failures, Rust Beta runtime settings, attached function artifacts, `api/axum.rs` rewrite destination and configured preview/production environments. Do not expose env values in issues or logs.
@@ -27,4 +49,4 @@ python3 scripts/smoke_testnet_http.py \
 
 No secrets should be placed in the command line. The test requires: usable `/health`, fresh Testnet RPC, network/capability safety flags false, disabled settlement POST (501), an actual same-ledger three-contract governance snapshot and no false claims about fee-collection, privacy verification, signing or authorization. The script now classifies Vercel platform failures explicitly.
 
-**Do not merge based solely on green CI or Vercel READY.** The staged smoke must pass with a reviewed deployment, and the new canonical release manifest, independent cryptographic verification and financial controls remain separate required milestones.
+**Do not claim backend runtime health based solely on green CI or Vercel READY.** The staged smoke must pass with a reviewed deployment, and the new canonical release manifest, independent cryptographic verification and financial controls remain separate required milestones.

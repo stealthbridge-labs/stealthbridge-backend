@@ -2,6 +2,10 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "rewrites": [
     {
+      "source": "/__runtime_node_probe",
+      "destination": "/api/runtime-node-probe"
+    },
+    {
       "source": "/__runtime_probe",
       "destination": "/api/runtime-probe"
     },
