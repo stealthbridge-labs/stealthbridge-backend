@@ -18,7 +18,7 @@ fn digit(b:u8)->Option<u8>{
  match b{b'A'..=b'Z'=>Some(b-b'A'),b'a'..=b'z'=>Some(b-b'a'+26),
  b'0'..=b'9'=>Some(b-b'0'+52),b'+'=>Some(62),b'/'=>Some(63),_=>None}
 }
-fn decode_base64(s:&str)->Result<Vec<u8>,()>{
+pub(crate) fn decode_base64(s:&str)->Result<Vec<u8>,()>{
  let b=s.as_bytes();
  if b.is_empty()||b.len()>65_536||!b.len().is_multiple_of(4){return Err(());}
  let mut out=Vec::with_capacity(b.len()/4*3);

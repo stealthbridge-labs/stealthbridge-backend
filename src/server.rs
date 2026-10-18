@@ -83,7 +83,7 @@ async fn limit_public_rpc_reads(
     next:Next,
 )->Response {
     let path=request.uri().path();
-    let costly=path=="/v1/governance/code" || path=="/v1/governance/release" || path=="/v1/network" || path.starts_with("/v1/transactions/") || path.starts_with("/v1/business/reviews/");
+    let costly=path=="/v1/governance/admin" || path=="/v1/governance/code" || path=="/v1/governance/release" || path=="/v1/network" || path.starts_with("/v1/transactions/") || path.starts_with("/v1/business/reviews/");
     if !costly || request.method()!=axum::http::Method::GET {
         return next.run(request).await;
     }
@@ -406,6 +406,22 @@ async fn contract_discovery() -> Result<Json<ContractDiscovery>,StatusCode> {
 /// independently verified Stellar RPC ledger/network identification.
 /// Inspect current contract-instance XDR headers without constructing,
 /// simulating, signing, submitting, or funding a single transaction.
+/// Read current public administrator storage, requiring the pinned executable
+/// hashes and a fresh Testnet ledger. Public addresses are NOT wallet ownership.
+async fn governance_admin(State(state):State<Arc<AppState>>)->Result<Json<Value>,StatusCode>{
+ let n=state.network().await.map_err(|_|StatusCode::BAD_GATEWAY)?;
+ let closed:u64=n.ledger_closed_at_unix.parse().map_err(|_|StatusCode::BAD_GATEWAY)?;
+ let now=SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_|StatusCode::BAD_GATEWAY)?.as_secs();
+ if closed>now.saturating_add(30)||now.saturating_sub(closed)>180{
+  return Err(StatusCode::SERVICE_UNAVAILABLE);
+ }
+ let keys=crate::governance_code::ledger_keys();
+ let reply=state.rpc_with_params("getLedgerEntries",
+  Some(json!({"keys":keys,"xdrFormat":"base64"})))
+  .await.map_err(|_|StatusCode::BAD_GATEWAY)?;
+ crate::governance_admin::assess(&reply,n.ledger_sequence)
+  .map(Json).map_err(|_|StatusCode::BAD_GATEWAY)
+}
 async fn governance_code(State(state):State<Arc<AppState>>)->Result<Json<Value>,StatusCode>{
  let n=state.network().await.map_err(|_|StatusCode::BAD_GATEWAY)?;
  let closed:u64=n.ledger_closed_at_unix.parse().map_err(|_|StatusCode::BAD_GATEWAY)?;
@@ -944,6 +960,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/contracts",get(contract_discovery))
         .route("/v1/governance/release",get(governance_release))
         .route("/v1/governance/code",get(governance_code))
+        .route("/v1/governance/admin",get(governance_admin))
         .route("/v1/corridors",get(corridors))
         .route("/v1/corridors/page",get(corridor_page))
         .route("/v1/corridors/{id}",get(corridor_by_id))
