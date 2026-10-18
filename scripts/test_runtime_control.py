@@ -23,6 +23,7 @@ class RuntimeControlTests(unittest.TestCase):
                           "backend_ready:true","network_verified:true"):
             self.assertNotIn(forbidden,content)
         for required in ("request.method!==\"GET\"","node_invocation_healthy:true",
+                         "rust_invocation_healthy:null",
                          "backend_ready:false","payment_execution_enabled:false",
                          "fee_collection_enabled:false","response.status(405)"):
             self.assertIn(required,content)

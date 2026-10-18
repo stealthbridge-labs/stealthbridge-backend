@@ -12,7 +12,7 @@ export default function handler(request,response) {
     service:"stealthbridge-backend-runtime-control",
     runtime:"nodejs",
     node_invocation_healthy:true,
-    rust_invocation_healthy:false,
+    rust_invocation_healthy:null,
     backend_ready:false,
     network_verified:false,
     privacy_verified:false,
