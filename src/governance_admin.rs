@@ -156,7 +156,7 @@ pub fn assess(reply:&Value,network_ledger:u64)->Result<Value,AdminObservationUna
  if code["all_executable_hashes_match_release"]!=true{return Err(().into());}
  let entries=reply["entries"].as_array().ok_or(())?;
  let keys=governance_code::ledger_keys();
- let mut records=Vec::with_capacity(3);
+ let mut records:Vec<Value>=Vec::with_capacity(3);
  let mut same_admin=true;
  let mut unchanged=true;
  for (i,(name,id)) in CID.iter().enumerate(){
