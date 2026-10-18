@@ -49,20 +49,20 @@ fn hex32(bytes:&[u8])->Result<String,()>{
 }
 /// Exactly decode the contract-instance XDR *header* through executable hash.
 /// Never assume the rest of instance storage is verified or claim WASM bytes were fetched.
-/// Struct: LedgerEntryData.ContractData (6), ExtensionPoint (0),
-/// SCAddress.Contract (1)+Hash, SCVal.LedgerKeyContractInstance (20),
-/// durability Persistent (1), SCVal.ContractInstance (19),
-/// ContractExecutable.Wasm (0)+Hash, SCMap* (0 or 1).
+/// Actual LedgerEntryData.ContractData (6), SCAddress.Contract (1)+Hash,
+/// SCVal.LedgerKeyContractInstance (20), durability Persistent (1),
+/// SCVal.ContractInstance (19), ContractExecutable.Wasm (0)+Hash,
+/// SCMap* (0 or 1). There is NO ContractDataEntry ExtensionPoint.
 fn executable_hash(value:&str,expected_ledger_key:&str)->Result<String,()>{
  let data=decode_base64(value)?;
  let ledger_key=decode_base64(expected_ledger_key)?;
- if ledger_key.len()!=48||data.len()<96||data.len()>48_000{return Err(());}
- for (offset,tag) in [(0,6),(4,0),(8,1),(44,20),(48,1),(52,19),(56,0)]{
+ if ledger_key.len()!=48||data.len()<92||data.len()>48_000{return Err(());}
+ for (offset,tag) in [(0,6),(4,1),(40,20),(44,1),(48,19),(52,0)]{
   if u32_at(&data,offset)?!=tag{return Err(());}
  }
- if data.get(12..44)!=ledger_key.get(8..40){return Err(());}
- if u32_at(&data,92)?>1{return Err(());}
- hex32(data.get(60..92).ok_or(())?)
+ if data.get(8..40)!=ledger_key.get(8..40){return Err(());}
+ if u32_at(&data,88)?>1{return Err(());}
+ hex32(data.get(56..88).ok_or(())?)
 }
 /// Public RPC supports sparse results for expired/absent ledger entries.
 /// Require all three and an observed ledger consistent with a fresh Testnet network
@@ -116,7 +116,7 @@ mod tests{
  fn data(key:&str,hash:&str)->String{
   let k=decode_base64(key).unwrap();
   let mut o=Vec::new();
-  o.extend_from_slice(&6u32.to_be_bytes());o.extend_from_slice(&0u32.to_be_bytes());
+  o.extend_from_slice(&6u32.to_be_bytes());
   o.extend_from_slice(&1u32.to_be_bytes());o.extend_from_slice(&k[8..40]);
   for tag in [20u32,1,19,0]{o.extend_from_slice(&tag.to_be_bytes());}
   for i in (0..64).step_by(2){o.push(u8::from_str_radix(&hash[i..i+2],16).unwrap());}
@@ -146,6 +146,19 @@ mod tests{
   let r=assess(&v,5244400).unwrap();
   assert_eq!(r["all_executable_hashes_match_release"],false);
   assert_eq!(r["contracts"][1]["matches_reviewed_release"],false);
+ }
+ #[test]fn real_contract_data_xdr_has_no_extension_discriminator(){
+  let (_,_,key,hash)=EXPECTED[0];
+  let bytes=decode_base64(&data(key,hash)).unwrap();
+  assert_eq!(bytes.len(),92);
+  assert_eq!(u32_at(&bytes,0),Ok(6));
+  assert_eq!(u32_at(&bytes,4),Ok(1)); // SCAddress.Contract, not an ExtensionPoint!
+  assert_eq!(u32_at(&bytes,40),Ok(20));
+  assert_eq!(u32_at(&bytes,48),Ok(19));
+  assert_eq!(u32_at(&bytes,52),Ok(0));
+  assert_eq!(u32_at(&bytes,88),Ok(0)); // Empty SCMap*
+  let mut forged=bytes.clone();forged[4..8].copy_from_slice(&0u32.to_be_bytes());
+  assert!(executable_hash(&base64(&forged),key).is_err());
  }
  #[test]fn malformed_rpc_missing_ttl_stale_ledger_and_wrong_contract_are_rejected(){
   let v=reply();
