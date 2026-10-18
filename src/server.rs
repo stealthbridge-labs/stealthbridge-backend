@@ -419,8 +419,12 @@ async fn governance_admin(State(state):State<Arc<AppState>>)->Result<Json<Value>
  let reply=state.rpc_with_params("getLedgerEntries",
   Some(json!({"keys":keys,"xdrFormat":"base64"})))
   .await.map_err(|_|StatusCode::BAD_GATEWAY)?;
- crate::governance_admin::assess(&reply,n.ledger_sequence)
-  .map(Json).map_err(|_|StatusCode::BAD_GATEWAY)
+ let mut verified=crate::governance_admin::assess(&reply,n.ledger_sequence)
+  .map_err(|_|StatusCode::BAD_GATEWAY)?;
+ // Bind the administrator observation to the independently checked, fresh
+ // Testnet RPC head. Offline/replayed SDK consumers must refuse stale data.
+ verified["observed_ledger_closed_at_unix"]=json!(n.ledger_closed_at_unix);
+ Ok(Json(verified))
 }
 async fn governance_code(State(state):State<Arc<AppState>>)->Result<Json<Value>,StatusCode>{
  let n=state.network().await.map_err(|_|StatusCode::BAD_GATEWAY)?;
