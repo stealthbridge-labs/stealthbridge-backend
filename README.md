@@ -2,6 +2,12 @@
 
 # StealthBridge Backend
 
+## Connected public Soroban Testnet reads
+
+The **three governance contracts have been deployed**, as evidenced by the [actual release receipts and WASM/admin readbacks](https://github.com/stealthbridge-labs/stealthbridge-contracts/blob/main/deployments/testnet/VERIFIED-GOVERNANCE-RELEASE-2026-10-17.md). The Rust/Axum service connects the product to Stellar RPC and persisted observer/corridor data. It exposes read-only `GET /v1/governance/release` (confirmed historical deployment receipts), `GET /v1/governance/code` (fresh contract-instance executable hash/TTL comparison), and `GET /v1/governance/admin` (current public contract-instance administrator state); it also serves network, capabilities, corridor and public activity reads. In preview mode, Next.js's **GET-only same-origin proxy** consumes these endpoints, and the TypeScript SDK validates corresponding wire data.
+
+Read the [organization integration topology](https://github.com/stealthbridge-labs/.github/blob/main/docs/INTEGRATION-TOPOLOGY.md) and [governance attestation adapter](docs/GOVERNANCE-ATTESTATION-ADAPTER.md). Code hashes matching an observed release and public administrator addresses are **not** authenticated signing authority; the backend must reject stale/wrong-network/malformed data. The old canonical v1 manifest still says `not-deployed` even though the independent three-contract deployment observation exists; no signed canonical v2 allowlist or financial-execution release may be inferred. Payment execution and platform fee collection remain disabled.
+
 **Engineering roadmap:** [View the repository-specific plan](ROADMAP.md).
 
 ## End-to-end platform architecture and delivery priorities
