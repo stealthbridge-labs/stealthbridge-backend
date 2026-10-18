@@ -26,7 +26,7 @@ vercel_runtime = { version = "2.4", features = ["axum"] }
 tower = "0.5"
 
 [[bin]]
-name = "main"
+name = "axum"
 path = "api/axum.rs"
 
 # Local Axum server and observer are intentionally distinct processes.
