@@ -128,7 +128,7 @@ fn parse_instance(xdr:&str,expected_key:&str)->Result<Vec<(String,ScVal)>,()>{
  d.read(32)?; // Executable hash, validated independently by governance_code::assess
  if d.u32()!=Ok(1){return Err(());} // Require actual, not absent, instance storage.
  let count=d.u32()? as usize;
- if count<2||count>32{return Err(());}
+ if !(2..=32).contains(&count){return Err(());}
  let mut fields=Vec::with_capacity(count);
  for _ in 0..count{
   let key=d.val(0)?;
