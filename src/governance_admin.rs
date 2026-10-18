@@ -118,9 +118,9 @@ fn public_contract(value:&ScVal)->Result<String,()>{
 fn parse_instance(xdr:&str,expected_key:&str)->Result<Vec<(String,ScVal)>,()>{
  let raw=governance_code::decode_base64(xdr)?;
  let ledger_key=governance_code::decode_base64(expected_key)?;
- if ledger_key.len()!=48||raw.len()<96||raw.len()>48_000{return Err(());}
+ if ledger_key.len()!=48||raw.len()<100||raw.len()>48_000{return Err(());}
  let mut d=Decoder::new(&raw);
- if d.u32()!=Ok(6)||d.u32()!=Ok(1){return Err(());}
+ if d.u32()!=Ok(6)||d.u32()!=Ok(0)||d.u32()!=Ok(1){return Err(());}
  if d.read(32)?!=ledger_key.get(8..40).ok_or(())?{return Err(());}
  if d.u32()!=Ok(20)||d.u32()!=Ok(1)||d.u32()!=Ok(19)||d.u32()!=Ok(0){
   return Err(());
@@ -133,7 +133,7 @@ fn parse_instance(xdr:&str,expected_key:&str)->Result<Vec<(String,ScVal)>,()>{
  for _ in 0..count{
   let key=d.val(0)?;
   let name=match key{
-   ScVal::Vec(mut v) if !v.is_empty()=>match v.remove(0){
+   ScVal::Vec(mut v) if v.len()==1=>match v.remove(0){
     ScVal::Symbol(name)=>name,
     _=>return Err(())
    },
@@ -235,7 +235,7 @@ mod tests{
  }
  fn fixture_entry(i:usize,admin_addr:&str,pending:Option<&str>)->String{
   let k=governance_code::decode_base64(governance_code::ledger_keys()[i]).unwrap();
-  let mut b=vec![];u(&mut b,6);u(&mut b,1);b.extend_from_slice(&k[8..40]);
+  let mut b=vec![];u(&mut b,6);u(&mut b,0);u(&mut b,1);b.extend_from_slice(&k[8..40]);
   for tag in [20,1,19,0]{u(&mut b,tag);}
   for h in (0..64).step_by(2){b.push(u8::from_str_radix(&H[i][h..h+2],16).unwrap());}
   u(&mut b,1);u(&mut b,if i==2{3}else{2+u32::from(pending.is_some())});
@@ -287,6 +287,21 @@ mod tests{
   x[56]=0xf0;
   r["entries"][1]["xdr"]=json!(encode64(&x));
   assert!(assess(&r,5244400).is_err());
+ }
+ #[test]fn parser_refuses_missing_entry_extension_and_multi_item_admin_key(){
+  let original=fixture_entry(0,ADMIN_RELEASE,None);
+  let bytes=governance_code::decode_base64(&original).unwrap();
+  // ContractDataEntry must contain ext=0 between type=6 and address=1.
+  let mut omitted=bytes.clone();omitted.drain(4..8);
+  assert!(parse_instance(&encode64(&omitted),governance_code::ledger_keys()[0]).is_err());
+  let mut invalid=bytes.clone();invalid[4..8].copy_from_slice(&1u32.to_be_bytes());
+  assert!(parse_instance(&encode64(&invalid),governance_code::ledger_keys()[0]).is_err());
+  // Canonical DataKey::Admin encodes SCV_VEC [SCV_SYMBOL("Admin")] only.
+  let key_bytes=[0,0,0,16,0,0,0,1,0,0,0,1];
+  let offset=bytes.windows(key_bytes.len()).position(|x|x==key_bytes).unwrap();
+  // Change vector item count to 2 without providing another element.
+  invalid=bytes.clone();invalid[offset+8..offset+12].copy_from_slice(&2u32.to_be_bytes());
+  assert!(parse_instance(&encode64(&invalid),governance_code::ledger_keys()[0]).is_err());
  }
  #[test]fn malformed_instance_storage_is_not_false_administrator_proof(){
   let base=reply([ADMIN_RELEASE;3],None);
