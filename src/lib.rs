@@ -17,3 +17,4 @@ pub mod protocol_upgrade;
 pub mod governance_release;
 pub mod governance_code;
 pub mod governance_admin;
+pub mod governance_consistency;
