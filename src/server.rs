@@ -83,7 +83,7 @@ async fn limit_public_rpc_reads(
     next:Next,
 )->Response {
     let path=request.uri().path();
-    let costly=path=="/v1/governance/admin" || path=="/v1/governance/code" || path=="/v1/governance/release" || path=="/v1/network" || path.starts_with("/v1/transactions/") || path.starts_with("/v1/business/reviews/");
+    let costly=path=="/v1/governance/snapshot" || path=="/v1/governance/admin" || path=="/v1/governance/code" || path=="/v1/governance/release" || path=="/v1/network" || path.starts_with("/v1/transactions/") || path.starts_with("/v1/business/reviews/");
     if !costly || request.method()!=axum::http::Method::GET {
         return next.run(request).await;
     }
@@ -408,6 +408,52 @@ async fn contract_discovery() -> Result<Json<ContractDiscovery>,StatusCode> {
 /// simulating, signing, submitting, or funding a single transaction.
 /// Read current public administrator storage, requiring the pinned executable
 /// hashes and a fresh Testnet ledger. Public addresses are NOT wallet ownership.
+/// One bounded governance observation: one Testnet RPC ledger-head probe and
+/// one getLedgerEntries read shared by current code AND stored administrators.
+/// The deployment receipts are independently confirmed against Horizon.
+/// A positive consistency result is never a signed manifest or spending approval.
+async fn governance_snapshot(State(state):State<Arc<AppState>>)->Result<Json<Value>,StatusCode>{
+ let n=state.network().await.map_err(|_|StatusCode::BAD_GATEWAY)?;
+ let closed:u64=n.ledger_closed_at_unix.parse().map_err(|_|StatusCode::BAD_GATEWAY)?;
+ let now=SystemTime::now().duration_since(UNIX_EPOCH)
+  .map_err(|_|StatusCode::BAD_GATEWAY)?.as_secs();
+ if closed>now.saturating_add(30)||now.saturating_sub(closed)>180{
+  return Err(StatusCode::SERVICE_UNAVAILABLE);
+ }
+ let entries=state.rpc_with_params("getLedgerEntries",
+  Some(json!({"keys":crate::governance_code::ledger_keys(),"xdrFormat":"base64"})))
+  .await.map_err(|_|StatusCode::BAD_GATEWAY)?;
+ let code=crate::governance_code::assess(&entries,n.ledger_sequence)
+  .map_err(|_|StatusCode::BAD_GATEWAY)?;
+ let mut administrators=crate::governance_admin::assess(&entries,n.ledger_sequence)
+  .map_err(|_|StatusCode::BAD_GATEWAY)?;
+ // Both observations refer to the SAME getLedgerEntries response; bind
+ // receipts to that observed ledger as well, rather than three RPC races.
+ let ledger=code["observed_ledger_sequence"].as_u64().ok_or(StatusCode::BAD_GATEWAY)?;
+ if administrators["observed_ledger_sequence"].as_u64()!=Some(ledger){
+  return Err(StatusCode::BAD_GATEWAY);
+ }
+ administrators["observed_ledger_closed_at_unix"]=json!(n.ledger_closed_at_unix);
+ let release=crate::governance_release::observe(
+  &state.http,ledger,&n.ledger_closed_at_unix)
+  .await.map_err(|_|StatusCode::BAD_GATEWAY)?;
+ let consistent=crate::governance_consistency::consistent_public_governance(
+  &release,&code,&administrators);
+ Ok(Json(json!({
+  "schema_version":1,"network":"testnet",
+  "source":"stellar-rpc+stellar-horizon",
+  "state":if consistent{"consistent-observations"}else{"unverified"},
+  "reason":if consistent{"Public same-ledger observations agree; canonical release not attested"}
+           else{"Code, public administrator or deployment receipt observations disagree"},
+  "observed_ledger_sequence":ledger,
+  // Fresh Testnet network-head close time (up to 15 ledgers from entry read).
+  "observed_network_head_closed_at_unix":n.ledger_closed_at_unix,
+  "release":release,"code":code,"administrators":administrators,
+  "canonical_manifest_attested":false,"signer_possession_verified":false,
+  "trusted_for_execution":false,"privacy_verified":false,
+  "payment_execution_enabled":false,"fee_collection_enabled":false
+ })))
+}
 async fn governance_admin(State(state):State<Arc<AppState>>)->Result<Json<Value>,StatusCode>{
  let n=state.network().await.map_err(|_|StatusCode::BAD_GATEWAY)?;
  let closed:u64=n.ledger_closed_at_unix.parse().map_err(|_|StatusCode::BAD_GATEWAY)?;
@@ -985,6 +1031,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/governance/release",get(governance_release))
         .route("/v1/governance/code",get(governance_code))
         .route("/v1/governance/admin",get(governance_admin))
+        .route("/v1/governance/snapshot",get(governance_snapshot))
         .route("/v1/corridors",get(corridors))
         .route("/v1/corridors/page",get(corridor_page))
         .route("/v1/corridors/{id}",get(corridor_by_id))
