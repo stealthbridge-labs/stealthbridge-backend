@@ -6,6 +6,21 @@ The `stealthbridge-backend` Vercel **production** deployment and multiple READY 
 
 **Conclusion:** the application is **not live-healthy**. Neither an exact failure cause nor a solution is verified. The evidence narrows the search toward Vercel function invocation, packaging, runtime initialization or project configuration rather than governance API business logic. Do not promote these previews or declare the product connected until direct API requests respond.
 
+## Reproduced Vercel-native Rust invocation failure — 18 October 2026
+
+The existing production deployment and **two fresh preview deployments built from backend `main` with build cache explicitly bypassed** were tested. A minimal Node function in the same project returns JSON with HTTP 200, but both `api/runtime-probe.rs` and `api/axum.rs` return HTTP 500 with `x-vercel-error: INTERNAL_FUNCTION_INVOCATION_FAILED`, even on `/health`. This precedes any network or database interaction in the minimal Rust probe. No Rust application errors were returned from the Vercel observability API.
+
+Tested without resolution:
+
+- Aligning Rust handler binary name with `api/axum.rs`.
+- Forcing a clean Vercel build by creating new preview deployments with `forceNew=1`. The logs confirm `Skipping build cache, deployment was triggered without cache`.
+- Enabling Fluid Compute at the Vercel backend project level and rebuilding without cache.
+- Comparing Vercel Node control with the independent Rust runtime probe and full Axum route on **the same deployed URL**.
+
+**Reproducing deployment:** `dpl_G7in9kWLk2Sc9LnHkTY9SQayZqTq` (preview built from `main`). Node `/__runtime_node_probe`: 200; Rust `/__runtime_probe`: 500; `/health`: 500. Sample failed request IDs from the same deployment: `fra1:iad1::stbx5-1792338537746-f9e645d3bc55`, `fra1:iad1::dzr5t-1792338606115-c4d6a5d0d1d7`. They contain no access credentials. The exact Rust execution failure remains **unidentified**; do not claim the backend is fixed.
+
+**Follow-up:** Open that deployment's **Resources → Rust function artifact / runtime settings / Logs** in Vercel and verify actual binary packaging, architecture, permissions, shared library loading, runtime bridge initialization, invocation region and Beta runtime service errors. Escalate the minimal independent Rust repro and request IDs to Vercel support if no invocation traces exist. Preserve SSO protection and read-only financial gates. An HTTP 200 on Node must never satisfy backend release acceptance.
+
 ## Node.js control probe (diagnostic only)
 
 A single **Node.js control function** is available at `GET /__runtime_node_probe`.
