@@ -22,6 +22,6 @@ jobs:
             exit 1
           fi
       - name: Require actual read-only Vercel Testnet observations
-        run: python3 scripts/smoke_testnet_http.py --url "$STEALTHBRIDGE_STAGING_API_URL" --require-live-network --max-ledger-age-seconds 180
+        run: python3 scripts/smoke_testnet_http.py --url "$STEALTHBRIDGE_STAGING_API_URL" --require-live-network --require-governance-snapshot --max-ledger-age-seconds 180
       - name: Verify no premature payment controls
-        run: echo 'Post-deploy staging GET probes passed; settlement POST returned disabled HTTP 501. No funds were moved.'
+        run: echo 'Post-deploy staging GET probes, single-ledger governance consistency, and disabled settlement HTTP 501 passed. No funds were moved.'
