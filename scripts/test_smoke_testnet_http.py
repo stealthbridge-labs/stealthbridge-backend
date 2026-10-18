@@ -11,7 +11,7 @@ spec.loader.exec_module(smoke)
 
 HASH = "ab" * 32
 
-def fake_probe(age=10, degraded=False):
+def fake_probe(age=10, degraded=False, forged_snapshot=False):
     def probe(_origin, path, method="GET"):
         if path == "/health":
             return 200, {"status": "ok"}
@@ -27,6 +27,23 @@ def fake_probe(age=10, degraded=False):
             return 200, {"network": "testnet", "passphrase": "Test SDF Network ; September 2015",
                          "ledger_sequence": 123, "ledger_hash": HASH, "protocol_version": 23,
                          "ledger_closed_at_unix": str(int(time.time()) - age)}
+        if path == "/v1/governance/snapshot":
+            status = {
+                "schema_version": 1, "network": "testnet",
+                "source": "stellar-rpc+stellar-horizon",
+                "state": "consistent-observations",
+                "observed_ledger_sequence": 5244400,
+                **{k: False for k in ("canonical_manifest_attested",
+                    "signer_possession_verified", "trusted_for_execution",
+                    "privacy_verified", "payment_execution_enabled",
+                    "fee_collection_enabled")},
+                **{k: {"network": "testnet", "observed_ledger_sequence": 5244400,
+                         "contracts": [{}, {}, {}]} for k in
+                    ("release", "code", "administrators")}
+            }
+            if forged_snapshot:
+                status["payment_execution_enabled"] = True
+            return 200, status
         if path == "/v1/settlements" and method == "POST":
             return 501, {"error": {"code": "FEATURE_DISABLED"}, "trace_id": "test"}
         if path == "/v1/transactions/not-a-hash":
@@ -49,6 +66,28 @@ class SmokeVerificationTests(unittest.TestCase):
     def test_fresh_live_ledger_passes(self):
         with patch.object(smoke, "probe", fake_probe()):
             smoke.verify("https://api.example", require_live_network=True)
+
+    def test_single_ledger_governance_is_required_before_release(self):
+        with patch.object(smoke, "probe", fake_probe()):
+            smoke.verify("https://api.example", require_live_network=True,
+                         require_governance_snapshot=True)
+        with patch.object(smoke, "probe", fake_probe(forged_snapshot=True)):
+            with self.assertRaisesRegex(AssertionError, "unsafe governance assertion"):
+                smoke.verify("https://api.example", require_governance_snapshot=True)
+
+    def test_vercel_platform_invocation_error_never_becomes_fake_json(self):
+        from urllib.error import HTTPError
+        from io import BytesIO
+        crash = HTTPError("https://example.test/health", 500,
+                          "Internal Server Error",
+                          {"x-vercel-error": "INTERNAL_FUNCTION_INVOCATION_FAILED"},
+                          BytesIO(b"A server error has occurred"))
+        class Opener:
+            def open(self, *_args, **_kwargs):
+                raise crash
+        with patch.object(smoke, "build_opener", return_value=Opener()):
+            with self.assertRaisesRegex(RuntimeError, "INTERNAL_FUNCTION_INVOCATION_FAILED"):
+                smoke.probe("https://example.test", "/health")
 
     def test_stale_ledger_fails(self):
         with patch.object(smoke, "probe", fake_probe(age=400)):

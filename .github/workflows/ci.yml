@@ -47,8 +47,8 @@ jobs:
         run: python3 -m unittest scripts/test_manifest_parity.py scripts/test_verify_consumer_contracts.py
       - name: Check backend API against pinned SDK and frontend source
         env:
-          STEALTHBRIDGE_SDK_REF: 437b5b23dd90cdad710318c22590c1edcf208e04
-          STEALTHBRIDGE_FRONTEND_REF: 5de5b9ef7eb81406acfc35afc35741cf173ed4af
+          STEALTHBRIDGE_SDK_REF: a48a4026831226b9febbbda631abde9a81da41ab
+          STEALTHBRIDGE_FRONTEND_REF: 05a576025200040ab0b1b487558491322aead09c
         run: python3 scripts/verify_consumer_contracts.py
       - name: Check real deployed governance evidence against reviewed contracts commit
         run: |

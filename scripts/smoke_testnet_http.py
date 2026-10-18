@@ -30,6 +30,16 @@ def probe(origin, path, method="GET"):
             code, raw = response.status, response.read(65537)
     except HTTPError as error:
         code, raw = error.code, error.read(65537)
+        # Distinguish a platform-level failure from our JSON API errors.
+        # NEVER treat Vercel's "READY" build as proof of a healthy invocation.
+        platform_code = error.headers.get("x-vercel-error")
+        if platform_code:
+            if not re.fullmatch(r"[A-Z_]{2,100}",platform_code):
+                platform_code="VERCEL_PLATFORM_ERROR"
+            raise RuntimeError(
+                f"{path}: Vercel function invocation failed (HTTP {code}, "
+                f"{platform_code}); inspect deployment Functions/Logs and runtime settings"
+            )
     if len(raw) > 65536:
         raise ValueError(f"{path}: response exceeds 64 KiB")
     try:
@@ -44,7 +54,7 @@ def error_is(body, allowed):
     error = body.get("error")
     return isinstance(error, dict) and error.get("code") in allowed and isinstance(body.get("trace_id"), str)
 
-def verify(origin, require_live_network=False, max_ledger_age_seconds=180):
+def verify(origin, require_live_network=False, max_ledger_age_seconds=180, require_governance_snapshot=False):
     status, health = probe(origin, "/health")
     assert status == 200 and health.get("status") == "ok", "liveness failed"
     status, cap = probe(origin, "/v1/capabilities")
@@ -81,6 +91,27 @@ def verify(origin, require_live_network=False, max_ledger_age_seconds=180):
         if require_live_network:
             raise AssertionError("live Testnet RPC is required; degraded network is not deployment-ready")
         print("DEGRADED: Stellar RPC unavailable; live ledger not observed")
+    if require_governance_snapshot:
+        status, snapshot = probe(origin, "/v1/governance/snapshot")
+        assert status == 200, "atomic public governance snapshot is unavailable"
+        assert snapshot.get("network") == "testnet"
+        assert snapshot.get("state") == "consistent-observations", "governance observations disagree"
+        assert snapshot.get("source") == "stellar-rpc+stellar-horizon"
+        assert snapshot.get("schema_version") == 1
+        assert isinstance(snapshot.get("observed_ledger_sequence"), int)
+        assert snapshot["observed_ledger_sequence"] > 5244293
+        for field in ("canonical_manifest_attested", "signer_possession_verified",
+                      "trusted_for_execution", "privacy_verified",
+                      "payment_execution_enabled", "fee_collection_enabled"):
+            assert snapshot.get(field) is False, f"unsafe governance assertion: {field}"
+        for field in ("release", "code", "administrators"):
+            assert isinstance(snapshot.get(field), dict), f"missing {field} observation"
+            assert snapshot[field].get("network") == "testnet"
+            assert snapshot[field].get("observed_ledger_sequence") == snapshot["observed_ledger_sequence"]
+        assert len(snapshot["release"].get("contracts", [])) == 3
+        assert len(snapshot["code"].get("contracts", [])) == 3
+        assert len(snapshot["administrators"].get("contracts", [])) == 3
+        print("PASS: public single-ledger governance observations agree; execution remains disabled")
     status, write = probe(origin, "/v1/settlements", method="POST")
     assert status == 501 and error_is(write, {"FEATURE_DISABLED"}), "settlement write unexpectedly enabled"
     status, invalid = probe(origin, "/v1/transactions/not-a-hash")
@@ -91,6 +122,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", required=True, help="Deployed HTTPS staging API origin")
     parser.add_argument("--require-live-network", action="store_true", help="Require a fresh Stellar Testnet ledger")
+    parser.add_argument("--require-governance-snapshot", action="store_true", help="Require same-ledger public governance agreement")
     parser.add_argument("--max-ledger-age-seconds", type=int, default=180, help="Max observed ledger age in seconds")
     args = parser.parse_args()
     if not 1 <= args.max_ledger_age_seconds <= 3600:
@@ -102,8 +134,8 @@ def main():
             not parsed.port in (None,443)):
         parser.error("Only HTTPS staging API origins without credentials, port, path or query are accepted")
     try:
-        verify(origin, args.require_live_network, args.max_ledger_age_seconds)
-    except (AssertionError, URLError, ValueError, TimeoutError) as error:
+        verify(origin, args.require_live_network, args.max_ledger_age_seconds, args.require_governance_snapshot)
+    except (AssertionError, URLError, ValueError, TimeoutError, RuntimeError) as error:
         print(f"FAIL: {error}", file=sys.stderr)
         sys.exit(1)
 
