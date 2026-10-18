@@ -37,3 +37,7 @@ path = "src/main.rs"
 [[bin]]
 name = "ledger-observer"
 path = "src/bin/ledger-observer.rs"
+
+[[bin]]
+name = "runtime-probe"
+path = "api/runtime-probe.rs"
