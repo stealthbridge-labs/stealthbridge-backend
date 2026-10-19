@@ -36,17 +36,19 @@ fn encode_base64(bytes:&[u8])->String{
  }
  out
 }
-pub fn inspect_entry(reply:&Value,network_head:u64,key:&str)->Result<Option<Value>,()>{
- let ledger=reply["latestLedger"].as_u64().ok_or(())?;
- if ledger==0||ledger.abs_diff(network_head)>15{return Err(());}
- let entries=reply["entries"].as_array().ok_or(())?;
+#[derive(Debug)]
+pub struct InspectError;
+pub fn inspect_entry(reply:&Value,network_head:u64,key:&str)->Result<Option<Value>,InspectError>{
+ let ledger=reply["latestLedger"].as_u64().ok_or(InspectError)?;
+ if ledger==0||ledger.abs_diff(network_head)>15{return Err(InspectError);}
+ let entries=reply["entries"].as_array().ok_or(InspectError)?;
  if entries.is_empty(){return Ok(None);}
- if entries.len()!=1||entries[0]["key"]!=key{return Err(());}
+ if entries.len()!=1||entries[0]["key"]!=key{return Err(InspectError);}
  let item=&entries[0];
- let last=item["lastModifiedLedgerSeq"].as_u64().ok_or(())?;
- let expiry=item["liveUntilLedgerSeq"].as_u64().ok_or(())?;
- if last==0||last>ledger||expiry<ledger{return Err(());}
- let hash=crate::governance_code::executable_hash(item["xdr"].as_str().ok_or(())?,key)?;
+ let last=item["lastModifiedLedgerSeq"].as_u64().ok_or(InspectError)?;
+ let expiry=item["liveUntilLedgerSeq"].as_u64().ok_or(InspectError)?;
+ if last==0||last>ledger||expiry<ledger{return Err(InspectError);}
+ let hash=crate::governance_code::executable_hash(item["xdr"].as_str().ok_or(InspectError)?,key).map_err(|_|InspectError)?;
  Ok(Some(json!({"observed_ledger_sequence":ledger,
   "executable_wasm_hash":hash,"live_until_ledger":expiry})))
 }
