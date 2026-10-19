@@ -55,7 +55,7 @@ fn hex32(bytes:&[u8])->Result<String,()>{
 /// ContractExecutable.Wasm (0)+Hash, SCMap* (0 or 1).
 /// CAUTION: the corresponding LedgerKeyContractData has NO ext field.
 /// Stellar's published getLedgerEntries example begins [6, 0, 1].
-fn executable_hash(value:&str,expected_ledger_key:&str)->Result<String,()>{
+pub(crate) fn executable_hash(value:&str,expected_ledger_key:&str)->Result<String,()>{
  let data=decode_base64(value)?;
  let ledger_key=decode_base64(expected_ledger_key)?;
  if ledger_key.len()!=48||data.len()<96||data.len()>48_000{return Err(());}
