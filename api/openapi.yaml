@@ -45,6 +45,1109 @@ paths:
               schema: {$ref: "#/components/schemas/LedgerCheckpoint"}
         "404": {$ref: "#/components/responses/ApiError"}
         "503": {$ref: "#/components/responses/ApiError"}
+  /v1/wallet/contracts/{address}:
+    get:
+      operationId: publicContractInstance
+      summary: Read an existing Testnet Soroban C-address contract instance
+      description: >
+        Consent-triggered public getLedgerEntries evidence. A contract instance
+        does NOT prove it is a smart-account wallet or that any signer controls
+        it. No payment execution, custody, confidential proof or fee is enabled.
+      parameters:
+        - in: path
+          name: address
+          required: true
+          schema: {type: string, pattern: '^C[A-Z2-7]{55}    get:
+      operationId: network
+      summary: Read observed Stellar Testnet ledger after verifying network passphrase
+      responses:
+        "200":
+          description: Observed ledger metadata
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/NetworkStatus"}
+        "429": {$ref: "#/components/responses/ApiError"}
+        "502": {$ref: "#/components/responses/ApiError"}
+  /v1/governance/snapshot:
+    get:
+      operationId: governanceSnapshot
+      summary: Same-ledger public Testnet governance snapshot (not payment authority)
+      description: >
+        Combines one validated getLedgerEntries response for three pinned Soroban
+        contract-instance code/admin observations with public historical Horizon
+        deployment receipts. The legacy canonical manifest remains unapproved.
+      responses:
+        "200":
+          description: Read-only evidence; execution, fees, privacy and signer custody remain unverified
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [schema_version, network, source, state, reason,
+                  observed_ledger_sequence, observed_network_head_closed_at_unix,
+                  release, code, administrators, canonical_manifest_attested,
+                  signer_possession_verified, trusted_for_execution, privacy_verified,
+                  payment_execution_enabled, fee_collection_enabled]
+                properties:
+                  schema_version: {type: integer, const: 1}
+                  network: {type: string, const: testnet}
+                  source: {type: string, const: "stellar-rpc+stellar-horizon"}
+                  state: {type: string, enum: [consistent-observations, unverified]}
+                  reason: {type: string, maxLength: 220}
+                  observed_ledger_sequence: {type: integer, minimum: 5244293}
+                  observed_network_head_closed_at_unix: {type: string, pattern: "^[0-9]+$"}
+                  release: {type: object}
+                  code: {type: object}
+                  administrators: {type: object}
+                  canonical_manifest_attested: {type: boolean, const: false}
+                  signer_possession_verified: {type: boolean, const: false}
+                  trusted_for_execution: {type: boolean, const: false}
+                  privacy_verified: {type: boolean, const: false}
+                  payment_execution_enabled: {type: boolean, const: false}
+                  fee_collection_enabled: {type: boolean, const: false}
+        "429": {$ref: "#/components/responses/ApiError"}
+        "502": {$ref: "#/components/responses/ApiError"}
+        "503": {$ref: "#/components/responses/ApiError"}
+  /v1/contracts:
+    get:
+      operationId: contractDiscovery
+      summary: Source-verified Soroban registry interface and undeployed Testnet manifest
+      responses:
+        "200":
+          description: Canonical source manifest + read method inventory; on-chain verification false
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ContractDiscovery"}
+        "503": {$ref: "#/components/responses/ApiError"}
+  /v1/capabilities:
+    get:
+      operationId: capabilities
+      summary: Truthful capability flags, never inferred from RPC liveness
+      responses:
+        "200":
+          description: Current integration flags
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Capabilities"}
+  /v1/platform/modules:
+    get:
+      operationId: platformModules
+      summary: Conservative product feature inventory; does not enable transactions
+      responses:
+        "200":
+          description: Read-only product scope and explicit unavailable features
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PlatformCatalog"}
+  /v1/business/reviews/{organization}/{request_id}:
+    get:
+      operationId: businessReviewStatus
+      summary: Authenticated tenant-scoped review counts, no financial permission
+      description: >-
+        Requires a short-lived, server-issued, network-bound organization read
+        session. Disabled without STEALTHBRIDGE_AUTH_DOMAIN and
+        STEALTHBRIDGE_SESSION_SECRET. Does not expose reviewer identities or
+        payment execution, and does not create review records.
+      security: [{OrganizationReadBearer: []}]
+      parameters:
+        - name: organization
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+        - name: request_id
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        "200":
+          description: Tenant-scoped stored reviewer count; never payment authorization
+          headers:
+            Cache-Control: {schema: {type: string, const: no-store}}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/BusinessReviewStatus"}
+        "401": {$ref: "#/components/responses/ApiError"}
+        "404": {$ref: "#/components/responses/ApiError"}
+        "429": {$ref: "#/components/responses/ApiError"}
+        "503": {$ref: "#/components/responses/ApiError"}
+  /v1/corridors:
+    get:
+      operationId: corridors
+      summary: List enabled, operator-created corridor entries, potentially empty
+      responses:
+        "200":
+          description: Registered enabled corridors
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Corridor"}
+        "503": {$ref: "#/components/responses/ApiError"}
+  /v1/corridors/page:
+    get:
+      operationId: corridorPage
+      summary: Read stable keyset pages of enabled, operator-configured corridors
+      parameters:
+        - name: after
+          in: query
+          description: Previous next_cursor UUID; omit on first page
+          schema: {type: string, format: uuid}
+        - name: limit
+          in: query
+          description: Items per page, default 25, maximum 100
+          schema: {type: integer, minimum: 1, maximum: 100, default: 25}
+        - name: origin_country
+          in: query
+          description: Optional uppercase two-letter origin country, metadata only
+          schema: {type: string, pattern: "^[A-Z]{2}$"}
+        - name: destination_country
+          in: query
+          description: Optional uppercase two-letter destination country, metadata only
+          schema: {type: string, pattern: "^[A-Z]{2}$"}
+        - name: privacy_rail
+          in: query
+          description: Operator-declared research rail, not payout eligibility
+          schema: {type: string, enum: [confidential-token, private-payments]}
+      responses:
+        "200":
+          description: Enabled operator-configured corridor page, no FX or payouts
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/CorridorPage"}
+        "400": {$ref: "#/components/responses/ApiError"}
+        "503": {$ref: "#/components/responses/ApiError"}
+  /v1/corridors/{id}:
+    get:
+      operationId: corridorById
+      summary: Retrieve a single enabled, operator-configured corridor
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        "200":
+          description: Configured enabled corridor, not proof of real partner/liquidity eligibility
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Corridor"}
+        "400": {$ref: "#/components/responses/ApiError"}
+        "404": {$ref: "#/components/responses/ApiError"}
+        "503": {$ref: "#/components/responses/ApiError"}
+  /v1/transactions/{hash}:
+    get:
+      operationId: transactionObservation
+      summary: Read public Testnet transaction status without exposing raw XDR or events
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          description: Exact 64-character hex transaction hash
+          schema: {type: string, pattern: "^[a-fA-F0-9]{64}$"}
+      responses:
+        "200":
+          description: Transaction included in retained Stellar RPC history (success or failed execution)
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TransactionObservation"}
+        "400": {$ref: "#/components/responses/ApiError"}
+        "404": {$ref: "#/components/responses/ApiError"}
+        "429": {$ref: "#/components/responses/ApiError"}
+        "502": {$ref: "#/components/responses/ApiError"}
+  /v1/settlements:
+    post:
+      operationId: disabledSettlement
+      summary: Reserved future authentication-bound settlement command, disabled
+      responses:
+        "501": {$ref: "#/components/responses/ApiError"}
+components:
+  securitySchemes:
+    OrganizationReadBearer:
+      type: http
+      scheme: bearer
+      description: Signed, short-lived Testnet organization read session; no payment authority.
+    MetricsBearer:
+      type: http
+      scheme: bearer
+      description: Required only when STEALTHBRIDGE_METRICS_TOKEN enables the internal metrics route.
+  responses:
+    ApiError:
+      description: Safe structured error with a generated trace identifier
+      headers:
+        X-Request-ID:
+          description: Correlates this response with the matching server log event.
+          schema: {type: string, format: uuid}
+        X-Error-Code:
+          description: Stable machine-readable code matching error.code in the response body.
+          schema: {type: string}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ErrorEnvelope"}
+  schemas:
+    ErrorEnvelope:
+      type: object
+      required: [error, trace_id]
+      properties:
+        error: {$ref: "#/components/schemas/ErrorDetail"}
+        trace_id: {type: string, format: uuid}
+        details:
+          description: Present for degraded readiness and contains only dependency status fields.
+          $ref: "#/components/schemas/Readiness"
+    ErrorDetail:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum: [INVALID_REQUEST, UNAUTHORIZED, NOT_FOUND, RATE_LIMITED, UPSTREAM_UNAVAILABLE, DEPENDENCY_UNAVAILABLE, FEATURE_DISABLED, REQUEST_FAILED]
+        message: {type: string}
+    Readiness:
+      type: object
+      required: [status, stellar_rpc, database, payments]
+      properties:
+        status: {type: string, enum: [ready, degraded]}
+        stellar_rpc: {type: string, enum: [connected, unavailable]}
+        database: {type: string, enum: [connected, unavailable, not-configured]}
+        payments: {type: string, const: disabled}
+    ContractDiscovery:
+      type: object
+      required: [network, source, manifest, public_interface, on_chain_verified, payment_execution_enabled]
+      properties:
+        network: {type: string, const: testnet}
+        source: {type: string, const: stealthbridge-contracts/deployments/testnet/manifest.json}
+        manifest: {type: object}
+        public_interface: {type: object}
+        on_chain_verified: {type: boolean, const: false}
+        payment_execution_enabled: {type: boolean, const: false}
+    Capabilities:
+      type: object
+      required: [payments_enabled, confidential_token_verified, private_payments_verified, fiat_payouts_enabled]
+      properties:
+        payments_enabled: {type: boolean}
+        confidential_token_verified: {type: boolean}
+        private_payments_verified: {type: boolean}
+        fiat_payouts_enabled: {type: boolean}
+    BusinessReviewStatus:
+      type: object
+      required: [organization, request_id, review_count, remaining_reviewers, review_count_met, financial_execution_authorized, signatures_verified, source]
+      properties:
+        organization: {type: string, format: uuid}
+        request_id: {type: string, format: uuid}
+        review_count: {type: integer, minimum: 0, maximum: 4}
+        remaining_reviewers: {type: integer, minimum: 0, maximum: 4}
+        review_count_met: {type: boolean}
+        financial_execution_authorized: {type: boolean, const: false}
+        signatures_verified: {type: boolean, const: false}
+        source: {type: string, const: tenant-review-journal}
+    PlatformModule:
+      type: object
+      required: [id, audiences, availability, description]
+      properties:
+        id: {type: string}
+        audiences:
+          type: array
+          items: {type: string, enum: [consumer, business, developer, partner]}
+        availability: {type: string, enum: [metadata-only, planned, blocked]}
+        description: {type: string}
+    PlatformCatalog:
+      type: object
+      required: [product, network, payment_execution_enabled, privacy_verified, mainnet_enabled, modules]
+      properties:
+        product: {type: string, const: StealthBridge}
+        network: {type: string, const: testnet}
+        payment_execution_enabled: {type: boolean, const: false}
+        privacy_verified: {type: boolean, const: false}
+        mainnet_enabled: {type: boolean, const: false}
+        modules:
+          type: array
+          maxItems: 11
+          items: {$ref: "#/components/schemas/PlatformModule"}
+    LedgerCheckpoint:
+      type: object
+      required: [ledger_sequence, ledger_hash, ledger_closed_at_unix, source]
+      properties:
+        ledger_sequence: {type: integer, minimum: 1}
+        ledger_hash: {type: string, pattern: "^[a-f0-9]{64}$"}
+        ledger_closed_at_unix: {type: string}
+        source: {type: string, const: stellar-rpc}
+    NetworkStatus:
+      type: object
+      required: [network, passphrase, protocol_version, ledger_sequence, ledger_closed_at_unix, ledger_hash, source]
+      properties:
+        network: {type: string, const: testnet}
+        passphrase: {type: string}
+        protocol_version: {type: integer}
+        ledger_sequence: {type: integer}
+        ledger_closed_at_unix: {type: string}
+        ledger_hash: {type: string}
+        source: {type: string, const: stellar-rpc}
+    Corridor:
+      type: object
+      required: [id, origin_country, destination_country, asset_code, privacy_rail]
+      properties:
+        id: {type: string, format: uuid}
+        origin_country: {type: string}
+        destination_country: {type: string}
+        asset_code: {type: string}
+        asset_issuer: {type: [string, "null"]}
+        privacy_rail: {type: string, enum: [confidential-token, private-payments]}
+    CorridorPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items: {$ref: "#/components/schemas/Corridor"}
+        next_cursor: {type: [string, "null"], format: uuid}
+    TransactionObservation:
+      type: object
+      required: [hash, status, ledger, closed_at_unix, latest_ledger, source]
+      properties:
+        hash: {type: string, pattern: "^[0-9a-f]{64}$"}
+        status: {type: string, enum: [SUCCESS, FAILED]}
+        ledger: {type: integer}
+        closed_at_unix: {type: string}
+        latest_ledger: {type: integer}
+        source: {type: string, const: stellar-rpc}
+}
+      responses:
+        "200":
+          description: Public contract-instance metadata, or explicit not-found
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [schema_version, network, source, contract_address,
+                  contract_instance_found, observed_ledger_sequence,
+                  executable_wasm_hash, live_until_ledger,
+                  smart_account_verified, signer_authority_verified,
+                  privacy_verified, payment_execution_enabled, fee_collection_enabled]
+                properties:
+                  schema_version: {type: integer, const: 1}
+                  network: {type: string, const: testnet}
+                  source: {type: string, const: stellar-rpc/getLedgerEntries}
+                  contract_address: {type: string, pattern: '^C[A-Z2-7]{55}    get:
+      operationId: network
+      summary: Read observed Stellar Testnet ledger after verifying network passphrase
+      responses:
+        "200":
+          description: Observed ledger metadata
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/NetworkStatus"}
+        "429": {$ref: "#/components/responses/ApiError"}
+        "502": {$ref: "#/components/responses/ApiError"}
+  /v1/governance/snapshot:
+    get:
+      operationId: governanceSnapshot
+      summary: Same-ledger public Testnet governance snapshot (not payment authority)
+      description: >
+        Combines one validated getLedgerEntries response for three pinned Soroban
+        contract-instance code/admin observations with public historical Horizon
+        deployment receipts. The legacy canonical manifest remains unapproved.
+      responses:
+        "200":
+          description: Read-only evidence; execution, fees, privacy and signer custody remain unverified
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [schema_version, network, source, state, reason,
+                  observed_ledger_sequence, observed_network_head_closed_at_unix,
+                  release, code, administrators, canonical_manifest_attested,
+                  signer_possession_verified, trusted_for_execution, privacy_verified,
+                  payment_execution_enabled, fee_collection_enabled]
+                properties:
+                  schema_version: {type: integer, const: 1}
+                  network: {type: string, const: testnet}
+                  source: {type: string, const: "stellar-rpc+stellar-horizon"}
+                  state: {type: string, enum: [consistent-observations, unverified]}
+                  reason: {type: string, maxLength: 220}
+                  observed_ledger_sequence: {type: integer, minimum: 5244293}
+                  observed_network_head_closed_at_unix: {type: string, pattern: "^[0-9]+$"}
+                  release: {type: object}
+                  code: {type: object}
+                  administrators: {type: object}
+                  canonical_manifest_attested: {type: boolean, const: false}
+                  signer_possession_verified: {type: boolean, const: false}
+                  trusted_for_execution: {type: boolean, const: false}
+                  privacy_verified: {type: boolean, const: false}
+                  payment_execution_enabled: {type: boolean, const: false}
+                  fee_collection_enabled: {type: boolean, const: false}
+        "429": {$ref: "#/components/responses/ApiError"}
+        "502": {$ref: "#/components/responses/ApiError"}
+        "503": {$ref: "#/components/responses/ApiError"}
+  /v1/contracts:
+    get:
+      operationId: contractDiscovery
+      summary: Source-verified Soroban registry interface and undeployed Testnet manifest
+      responses:
+        "200":
+          description: Canonical source manifest + read method inventory; on-chain verification false
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ContractDiscovery"}
+        "503": {$ref: "#/components/responses/ApiError"}
+  /v1/capabilities:
+    get:
+      operationId: capabilities
+      summary: Truthful capability flags, never inferred from RPC liveness
+      responses:
+        "200":
+          description: Current integration flags
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Capabilities"}
+  /v1/platform/modules:
+    get:
+      operationId: platformModules
+      summary: Conservative product feature inventory; does not enable transactions
+      responses:
+        "200":
+          description: Read-only product scope and explicit unavailable features
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PlatformCatalog"}
+  /v1/business/reviews/{organization}/{request_id}:
+    get:
+      operationId: businessReviewStatus
+      summary: Authenticated tenant-scoped review counts, no financial permission
+      description: >-
+        Requires a short-lived, server-issued, network-bound organization read
+        session. Disabled without STEALTHBRIDGE_AUTH_DOMAIN and
+        STEALTHBRIDGE_SESSION_SECRET. Does not expose reviewer identities or
+        payment execution, and does not create review records.
+      security: [{OrganizationReadBearer: []}]
+      parameters:
+        - name: organization
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+        - name: request_id
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        "200":
+          description: Tenant-scoped stored reviewer count; never payment authorization
+          headers:
+            Cache-Control: {schema: {type: string, const: no-store}}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/BusinessReviewStatus"}
+        "401": {$ref: "#/components/responses/ApiError"}
+        "404": {$ref: "#/components/responses/ApiError"}
+        "429": {$ref: "#/components/responses/ApiError"}
+        "503": {$ref: "#/components/responses/ApiError"}
+  /v1/corridors:
+    get:
+      operationId: corridors
+      summary: List enabled, operator-created corridor entries, potentially empty
+      responses:
+        "200":
+          description: Registered enabled corridors
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Corridor"}
+        "503": {$ref: "#/components/responses/ApiError"}
+  /v1/corridors/page:
+    get:
+      operationId: corridorPage
+      summary: Read stable keyset pages of enabled, operator-configured corridors
+      parameters:
+        - name: after
+          in: query
+          description: Previous next_cursor UUID; omit on first page
+          schema: {type: string, format: uuid}
+        - name: limit
+          in: query
+          description: Items per page, default 25, maximum 100
+          schema: {type: integer, minimum: 1, maximum: 100, default: 25}
+        - name: origin_country
+          in: query
+          description: Optional uppercase two-letter origin country, metadata only
+          schema: {type: string, pattern: "^[A-Z]{2}$"}
+        - name: destination_country
+          in: query
+          description: Optional uppercase two-letter destination country, metadata only
+          schema: {type: string, pattern: "^[A-Z]{2}$"}
+        - name: privacy_rail
+          in: query
+          description: Operator-declared research rail, not payout eligibility
+          schema: {type: string, enum: [confidential-token, private-payments]}
+      responses:
+        "200":
+          description: Enabled operator-configured corridor page, no FX or payouts
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/CorridorPage"}
+        "400": {$ref: "#/components/responses/ApiError"}
+        "503": {$ref: "#/components/responses/ApiError"}
+  /v1/corridors/{id}:
+    get:
+      operationId: corridorById
+      summary: Retrieve a single enabled, operator-configured corridor
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        "200":
+          description: Configured enabled corridor, not proof of real partner/liquidity eligibility
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Corridor"}
+        "400": {$ref: "#/components/responses/ApiError"}
+        "404": {$ref: "#/components/responses/ApiError"}
+        "503": {$ref: "#/components/responses/ApiError"}
+  /v1/transactions/{hash}:
+    get:
+      operationId: transactionObservation
+      summary: Read public Testnet transaction status without exposing raw XDR or events
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          description: Exact 64-character hex transaction hash
+          schema: {type: string, pattern: "^[a-fA-F0-9]{64}$"}
+      responses:
+        "200":
+          description: Transaction included in retained Stellar RPC history (success or failed execution)
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TransactionObservation"}
+        "400": {$ref: "#/components/responses/ApiError"}
+        "404": {$ref: "#/components/responses/ApiError"}
+        "429": {$ref: "#/components/responses/ApiError"}
+        "502": {$ref: "#/components/responses/ApiError"}
+  /v1/settlements:
+    post:
+      operationId: disabledSettlement
+      summary: Reserved future authentication-bound settlement command, disabled
+      responses:
+        "501": {$ref: "#/components/responses/ApiError"}
+components:
+  securitySchemes:
+    OrganizationReadBearer:
+      type: http
+      scheme: bearer
+      description: Signed, short-lived Testnet organization read session; no payment authority.
+    MetricsBearer:
+      type: http
+      scheme: bearer
+      description: Required only when STEALTHBRIDGE_METRICS_TOKEN enables the internal metrics route.
+  responses:
+    ApiError:
+      description: Safe structured error with a generated trace identifier
+      headers:
+        X-Request-ID:
+          description: Correlates this response with the matching server log event.
+          schema: {type: string, format: uuid}
+        X-Error-Code:
+          description: Stable machine-readable code matching error.code in the response body.
+          schema: {type: string}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ErrorEnvelope"}
+  schemas:
+    ErrorEnvelope:
+      type: object
+      required: [error, trace_id]
+      properties:
+        error: {$ref: "#/components/schemas/ErrorDetail"}
+        trace_id: {type: string, format: uuid}
+        details:
+          description: Present for degraded readiness and contains only dependency status fields.
+          $ref: "#/components/schemas/Readiness"
+    ErrorDetail:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum: [INVALID_REQUEST, UNAUTHORIZED, NOT_FOUND, RATE_LIMITED, UPSTREAM_UNAVAILABLE, DEPENDENCY_UNAVAILABLE, FEATURE_DISABLED, REQUEST_FAILED]
+        message: {type: string}
+    Readiness:
+      type: object
+      required: [status, stellar_rpc, database, payments]
+      properties:
+        status: {type: string, enum: [ready, degraded]}
+        stellar_rpc: {type: string, enum: [connected, unavailable]}
+        database: {type: string, enum: [connected, unavailable, not-configured]}
+        payments: {type: string, const: disabled}
+    ContractDiscovery:
+      type: object
+      required: [network, source, manifest, public_interface, on_chain_verified, payment_execution_enabled]
+      properties:
+        network: {type: string, const: testnet}
+        source: {type: string, const: stealthbridge-contracts/deployments/testnet/manifest.json}
+        manifest: {type: object}
+        public_interface: {type: object}
+        on_chain_verified: {type: boolean, const: false}
+        payment_execution_enabled: {type: boolean, const: false}
+    Capabilities:
+      type: object
+      required: [payments_enabled, confidential_token_verified, private_payments_verified, fiat_payouts_enabled]
+      properties:
+        payments_enabled: {type: boolean}
+        confidential_token_verified: {type: boolean}
+        private_payments_verified: {type: boolean}
+        fiat_payouts_enabled: {type: boolean}
+    BusinessReviewStatus:
+      type: object
+      required: [organization, request_id, review_count, remaining_reviewers, review_count_met, financial_execution_authorized, signatures_verified, source]
+      properties:
+        organization: {type: string, format: uuid}
+        request_id: {type: string, format: uuid}
+        review_count: {type: integer, minimum: 0, maximum: 4}
+        remaining_reviewers: {type: integer, minimum: 0, maximum: 4}
+        review_count_met: {type: boolean}
+        financial_execution_authorized: {type: boolean, const: false}
+        signatures_verified: {type: boolean, const: false}
+        source: {type: string, const: tenant-review-journal}
+    PlatformModule:
+      type: object
+      required: [id, audiences, availability, description]
+      properties:
+        id: {type: string}
+        audiences:
+          type: array
+          items: {type: string, enum: [consumer, business, developer, partner]}
+        availability: {type: string, enum: [metadata-only, planned, blocked]}
+        description: {type: string}
+    PlatformCatalog:
+      type: object
+      required: [product, network, payment_execution_enabled, privacy_verified, mainnet_enabled, modules]
+      properties:
+        product: {type: string, const: StealthBridge}
+        network: {type: string, const: testnet}
+        payment_execution_enabled: {type: boolean, const: false}
+        privacy_verified: {type: boolean, const: false}
+        mainnet_enabled: {type: boolean, const: false}
+        modules:
+          type: array
+          maxItems: 11
+          items: {$ref: "#/components/schemas/PlatformModule"}
+    LedgerCheckpoint:
+      type: object
+      required: [ledger_sequence, ledger_hash, ledger_closed_at_unix, source]
+      properties:
+        ledger_sequence: {type: integer, minimum: 1}
+        ledger_hash: {type: string, pattern: "^[a-f0-9]{64}$"}
+        ledger_closed_at_unix: {type: string}
+        source: {type: string, const: stellar-rpc}
+    NetworkStatus:
+      type: object
+      required: [network, passphrase, protocol_version, ledger_sequence, ledger_closed_at_unix, ledger_hash, source]
+      properties:
+        network: {type: string, const: testnet}
+        passphrase: {type: string}
+        protocol_version: {type: integer}
+        ledger_sequence: {type: integer}
+        ledger_closed_at_unix: {type: string}
+        ledger_hash: {type: string}
+        source: {type: string, const: stellar-rpc}
+    Corridor:
+      type: object
+      required: [id, origin_country, destination_country, asset_code, privacy_rail]
+      properties:
+        id: {type: string, format: uuid}
+        origin_country: {type: string}
+        destination_country: {type: string}
+        asset_code: {type: string}
+        asset_issuer: {type: [string, "null"]}
+        privacy_rail: {type: string, enum: [confidential-token, private-payments]}
+    CorridorPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items: {$ref: "#/components/schemas/Corridor"}
+        next_cursor: {type: [string, "null"], format: uuid}
+    TransactionObservation:
+      type: object
+      required: [hash, status, ledger, closed_at_unix, latest_ledger, source]
+      properties:
+        hash: {type: string, pattern: "^[0-9a-f]{64}$"}
+        status: {type: string, enum: [SUCCESS, FAILED]}
+        ledger: {type: integer}
+        closed_at_unix: {type: string}
+        latest_ledger: {type: integer}
+        source: {type: string, const: stellar-rpc}
+}
+                  contract_instance_found: {type: boolean}
+                  observed_ledger_sequence: {type: integer, minimum: 1}
+                  executable_wasm_hash: {type: [string, 'null'], pattern: '^[a-f0-9]{64}    get:
+      operationId: network
+      summary: Read observed Stellar Testnet ledger after verifying network passphrase
+      responses:
+        "200":
+          description: Observed ledger metadata
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/NetworkStatus"}
+        "429": {$ref: "#/components/responses/ApiError"}
+        "502": {$ref: "#/components/responses/ApiError"}
+  /v1/governance/snapshot:
+    get:
+      operationId: governanceSnapshot
+      summary: Same-ledger public Testnet governance snapshot (not payment authority)
+      description: >
+        Combines one validated getLedgerEntries response for three pinned Soroban
+        contract-instance code/admin observations with public historical Horizon
+        deployment receipts. The legacy canonical manifest remains unapproved.
+      responses:
+        "200":
+          description: Read-only evidence; execution, fees, privacy and signer custody remain unverified
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [schema_version, network, source, state, reason,
+                  observed_ledger_sequence, observed_network_head_closed_at_unix,
+                  release, code, administrators, canonical_manifest_attested,
+                  signer_possession_verified, trusted_for_execution, privacy_verified,
+                  payment_execution_enabled, fee_collection_enabled]
+                properties:
+                  schema_version: {type: integer, const: 1}
+                  network: {type: string, const: testnet}
+                  source: {type: string, const: "stellar-rpc+stellar-horizon"}
+                  state: {type: string, enum: [consistent-observations, unverified]}
+                  reason: {type: string, maxLength: 220}
+                  observed_ledger_sequence: {type: integer, minimum: 5244293}
+                  observed_network_head_closed_at_unix: {type: string, pattern: "^[0-9]+$"}
+                  release: {type: object}
+                  code: {type: object}
+                  administrators: {type: object}
+                  canonical_manifest_attested: {type: boolean, const: false}
+                  signer_possession_verified: {type: boolean, const: false}
+                  trusted_for_execution: {type: boolean, const: false}
+                  privacy_verified: {type: boolean, const: false}
+                  payment_execution_enabled: {type: boolean, const: false}
+                  fee_collection_enabled: {type: boolean, const: false}
+        "429": {$ref: "#/components/responses/ApiError"}
+        "502": {$ref: "#/components/responses/ApiError"}
+        "503": {$ref: "#/components/responses/ApiError"}
+  /v1/contracts:
+    get:
+      operationId: contractDiscovery
+      summary: Source-verified Soroban registry interface and undeployed Testnet manifest
+      responses:
+        "200":
+          description: Canonical source manifest + read method inventory; on-chain verification false
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ContractDiscovery"}
+        "503": {$ref: "#/components/responses/ApiError"}
+  /v1/capabilities:
+    get:
+      operationId: capabilities
+      summary: Truthful capability flags, never inferred from RPC liveness
+      responses:
+        "200":
+          description: Current integration flags
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Capabilities"}
+  /v1/platform/modules:
+    get:
+      operationId: platformModules
+      summary: Conservative product feature inventory; does not enable transactions
+      responses:
+        "200":
+          description: Read-only product scope and explicit unavailable features
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PlatformCatalog"}
+  /v1/business/reviews/{organization}/{request_id}:
+    get:
+      operationId: businessReviewStatus
+      summary: Authenticated tenant-scoped review counts, no financial permission
+      description: >-
+        Requires a short-lived, server-issued, network-bound organization read
+        session. Disabled without STEALTHBRIDGE_AUTH_DOMAIN and
+        STEALTHBRIDGE_SESSION_SECRET. Does not expose reviewer identities or
+        payment execution, and does not create review records.
+      security: [{OrganizationReadBearer: []}]
+      parameters:
+        - name: organization
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+        - name: request_id
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        "200":
+          description: Tenant-scoped stored reviewer count; never payment authorization
+          headers:
+            Cache-Control: {schema: {type: string, const: no-store}}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/BusinessReviewStatus"}
+        "401": {$ref: "#/components/responses/ApiError"}
+        "404": {$ref: "#/components/responses/ApiError"}
+        "429": {$ref: "#/components/responses/ApiError"}
+        "503": {$ref: "#/components/responses/ApiError"}
+  /v1/corridors:
+    get:
+      operationId: corridors
+      summary: List enabled, operator-created corridor entries, potentially empty
+      responses:
+        "200":
+          description: Registered enabled corridors
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Corridor"}
+        "503": {$ref: "#/components/responses/ApiError"}
+  /v1/corridors/page:
+    get:
+      operationId: corridorPage
+      summary: Read stable keyset pages of enabled, operator-configured corridors
+      parameters:
+        - name: after
+          in: query
+          description: Previous next_cursor UUID; omit on first page
+          schema: {type: string, format: uuid}
+        - name: limit
+          in: query
+          description: Items per page, default 25, maximum 100
+          schema: {type: integer, minimum: 1, maximum: 100, default: 25}
+        - name: origin_country
+          in: query
+          description: Optional uppercase two-letter origin country, metadata only
+          schema: {type: string, pattern: "^[A-Z]{2}$"}
+        - name: destination_country
+          in: query
+          description: Optional uppercase two-letter destination country, metadata only
+          schema: {type: string, pattern: "^[A-Z]{2}$"}
+        - name: privacy_rail
+          in: query
+          description: Operator-declared research rail, not payout eligibility
+          schema: {type: string, enum: [confidential-token, private-payments]}
+      responses:
+        "200":
+          description: Enabled operator-configured corridor page, no FX or payouts
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/CorridorPage"}
+        "400": {$ref: "#/components/responses/ApiError"}
+        "503": {$ref: "#/components/responses/ApiError"}
+  /v1/corridors/{id}:
+    get:
+      operationId: corridorById
+      summary: Retrieve a single enabled, operator-configured corridor
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        "200":
+          description: Configured enabled corridor, not proof of real partner/liquidity eligibility
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Corridor"}
+        "400": {$ref: "#/components/responses/ApiError"}
+        "404": {$ref: "#/components/responses/ApiError"}
+        "503": {$ref: "#/components/responses/ApiError"}
+  /v1/transactions/{hash}:
+    get:
+      operationId: transactionObservation
+      summary: Read public Testnet transaction status without exposing raw XDR or events
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          description: Exact 64-character hex transaction hash
+          schema: {type: string, pattern: "^[a-fA-F0-9]{64}$"}
+      responses:
+        "200":
+          description: Transaction included in retained Stellar RPC history (success or failed execution)
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TransactionObservation"}
+        "400": {$ref: "#/components/responses/ApiError"}
+        "404": {$ref: "#/components/responses/ApiError"}
+        "429": {$ref: "#/components/responses/ApiError"}
+        "502": {$ref: "#/components/responses/ApiError"}
+  /v1/settlements:
+    post:
+      operationId: disabledSettlement
+      summary: Reserved future authentication-bound settlement command, disabled
+      responses:
+        "501": {$ref: "#/components/responses/ApiError"}
+components:
+  securitySchemes:
+    OrganizationReadBearer:
+      type: http
+      scheme: bearer
+      description: Signed, short-lived Testnet organization read session; no payment authority.
+    MetricsBearer:
+      type: http
+      scheme: bearer
+      description: Required only when STEALTHBRIDGE_METRICS_TOKEN enables the internal metrics route.
+  responses:
+    ApiError:
+      description: Safe structured error with a generated trace identifier
+      headers:
+        X-Request-ID:
+          description: Correlates this response with the matching server log event.
+          schema: {type: string, format: uuid}
+        X-Error-Code:
+          description: Stable machine-readable code matching error.code in the response body.
+          schema: {type: string}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ErrorEnvelope"}
+  schemas:
+    ErrorEnvelope:
+      type: object
+      required: [error, trace_id]
+      properties:
+        error: {$ref: "#/components/schemas/ErrorDetail"}
+        trace_id: {type: string, format: uuid}
+        details:
+          description: Present for degraded readiness and contains only dependency status fields.
+          $ref: "#/components/schemas/Readiness"
+    ErrorDetail:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum: [INVALID_REQUEST, UNAUTHORIZED, NOT_FOUND, RATE_LIMITED, UPSTREAM_UNAVAILABLE, DEPENDENCY_UNAVAILABLE, FEATURE_DISABLED, REQUEST_FAILED]
+        message: {type: string}
+    Readiness:
+      type: object
+      required: [status, stellar_rpc, database, payments]
+      properties:
+        status: {type: string, enum: [ready, degraded]}
+        stellar_rpc: {type: string, enum: [connected, unavailable]}
+        database: {type: string, enum: [connected, unavailable, not-configured]}
+        payments: {type: string, const: disabled}
+    ContractDiscovery:
+      type: object
+      required: [network, source, manifest, public_interface, on_chain_verified, payment_execution_enabled]
+      properties:
+        network: {type: string, const: testnet}
+        source: {type: string, const: stealthbridge-contracts/deployments/testnet/manifest.json}
+        manifest: {type: object}
+        public_interface: {type: object}
+        on_chain_verified: {type: boolean, const: false}
+        payment_execution_enabled: {type: boolean, const: false}
+    Capabilities:
+      type: object
+      required: [payments_enabled, confidential_token_verified, private_payments_verified, fiat_payouts_enabled]
+      properties:
+        payments_enabled: {type: boolean}
+        confidential_token_verified: {type: boolean}
+        private_payments_verified: {type: boolean}
+        fiat_payouts_enabled: {type: boolean}
+    BusinessReviewStatus:
+      type: object
+      required: [organization, request_id, review_count, remaining_reviewers, review_count_met, financial_execution_authorized, signatures_verified, source]
+      properties:
+        organization: {type: string, format: uuid}
+        request_id: {type: string, format: uuid}
+        review_count: {type: integer, minimum: 0, maximum: 4}
+        remaining_reviewers: {type: integer, minimum: 0, maximum: 4}
+        review_count_met: {type: boolean}
+        financial_execution_authorized: {type: boolean, const: false}
+        signatures_verified: {type: boolean, const: false}
+        source: {type: string, const: tenant-review-journal}
+    PlatformModule:
+      type: object
+      required: [id, audiences, availability, description]
+      properties:
+        id: {type: string}
+        audiences:
+          type: array
+          items: {type: string, enum: [consumer, business, developer, partner]}
+        availability: {type: string, enum: [metadata-only, planned, blocked]}
+        description: {type: string}
+    PlatformCatalog:
+      type: object
+      required: [product, network, payment_execution_enabled, privacy_verified, mainnet_enabled, modules]
+      properties:
+        product: {type: string, const: StealthBridge}
+        network: {type: string, const: testnet}
+        payment_execution_enabled: {type: boolean, const: false}
+        privacy_verified: {type: boolean, const: false}
+        mainnet_enabled: {type: boolean, const: false}
+        modules:
+          type: array
+          maxItems: 11
+          items: {$ref: "#/components/schemas/PlatformModule"}
+    LedgerCheckpoint:
+      type: object
+      required: [ledger_sequence, ledger_hash, ledger_closed_at_unix, source]
+      properties:
+        ledger_sequence: {type: integer, minimum: 1}
+        ledger_hash: {type: string, pattern: "^[a-f0-9]{64}$"}
+        ledger_closed_at_unix: {type: string}
+        source: {type: string, const: stellar-rpc}
+    NetworkStatus:
+      type: object
+      required: [network, passphrase, protocol_version, ledger_sequence, ledger_closed_at_unix, ledger_hash, source]
+      properties:
+        network: {type: string, const: testnet}
+        passphrase: {type: string}
+        protocol_version: {type: integer}
+        ledger_sequence: {type: integer}
+        ledger_closed_at_unix: {type: string}
+        ledger_hash: {type: string}
+        source: {type: string, const: stellar-rpc}
+    Corridor:
+      type: object
+      required: [id, origin_country, destination_country, asset_code, privacy_rail]
+      properties:
+        id: {type: string, format: uuid}
+        origin_country: {type: string}
+        destination_country: {type: string}
+        asset_code: {type: string}
+        asset_issuer: {type: [string, "null"]}
+        privacy_rail: {type: string, enum: [confidential-token, private-payments]}
+    CorridorPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items: {$ref: "#/components/schemas/Corridor"}
+        next_cursor: {type: [string, "null"], format: uuid}
+    TransactionObservation:
+      type: object
+      required: [hash, status, ledger, closed_at_unix, latest_ledger, source]
+      properties:
+        hash: {type: string, pattern: "^[0-9a-f]{64}$"}
+        status: {type: string, enum: [SUCCESS, FAILED]}
+        ledger: {type: integer}
+        closed_at_unix: {type: string}
+        latest_ledger: {type: integer}
+        source: {type: string, const: stellar-rpc}
+}
+                  live_until_ledger: {type: [integer, 'null'], minimum: 1}
+                  smart_account_verified: {type: boolean, const: false}
+                  signer_authority_verified: {type: boolean, const: false}
+                  privacy_verified: {type: boolean, const: false}
+                  payment_execution_enabled: {type: boolean, const: false}
+                  fee_collection_enabled: {type: boolean, const: false}
+        "400": {$ref: "#/components/responses/ApiError"}
+        "429": {$ref: "#/components/responses/ApiError"}
+        "502": {$ref: "#/components/responses/ApiError"}
+        "503": {$ref: "#/components/responses/ApiError"}
   /v1/network:
     get:
       operationId: network
