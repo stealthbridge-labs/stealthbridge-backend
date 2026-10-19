@@ -66,4 +66,38 @@ mod tests{
   assert!(inspect_entry(&json!({"latestLedger":5,"entries":[]}),5,"target").unwrap().is_none());
   assert!(inspect_entry(&json!({"latestLedger":5,"entries":[]}),35,"target").is_err());
  }
+ #[test]fn accepts_a_live_contract_only_with_matching_key_hash_and_ttl(){
+  let address="CDS6HBE6YJSZTRG3VR2HLCNHWJZMKB43BLFFEHEH3Z76WXAF46LW7JOB";
+  let key=instance_ledger_key(address).unwrap();
+  let raw_key=crate::governance_code::decode_base64(&key).unwrap();
+  let mut entry=Vec::<u8>::new();
+  entry.extend_from_slice(&6u32.to_be_bytes()); // LedgerEntryData.ContractData
+  entry.extend_from_slice(&0u32.to_be_bytes()); // ContractDataEntry.ext
+  entry.extend_from_slice(&1u32.to_be_bytes()); // SCAddress.Contract
+  entry.extend_from_slice(&raw_key[8..40]);
+  entry.extend_from_slice(&20u32.to_be_bytes()); // instance key
+  entry.extend_from_slice(&1u32.to_be_bytes()); // persistent
+  entry.extend_from_slice(&19u32.to_be_bytes()); // ContractInstance SCVal
+  entry.extend_from_slice(&0u32.to_be_bytes()); // Wasm executable tag
+  entry.extend_from_slice(&[42u8;32]); // executable hash
+  entry.extend_from_slice(&0u32.to_be_bytes()); // absent storage map
+  assert_eq!(entry.len(),96);
+  let xdr=encode_base64(&entry);
+  let response=json!({"latestLedger":500,"entries":[{
+    "key":key,"xdr":xdr,"lastModifiedLedgerSeq":495,"liveUntilLedgerSeq":550
+  }]});
+  let valid=inspect_entry(&response,500,&key).unwrap().unwrap();
+  assert_eq!(valid["executable_wasm_hash"],"2a".repeat(32));
+  assert_eq!(valid["live_until_ledger"],550);
+  let mut expired=response.clone();
+  expired["entries"][0]["liveUntilLedgerSeq"]=json!(499);
+  assert!(inspect_entry(&expired,500,&key).is_err());
+  let mut wrong_key=response.clone();
+  wrong_key["entries"][0]["key"]=json!("forged");
+  assert!(inspect_entry(&wrong_key,500,&key).is_err());
+  let mut repeated=response.clone();
+  repeated["entries"].as_array_mut().unwrap().push(response["entries"][0].clone());
+  assert!(inspect_entry(&repeated,500,&key).is_err());
+ }
+
 }
