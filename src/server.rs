@@ -83,7 +83,7 @@ async fn limit_public_rpc_reads(
     next:Next,
 )->Response {
     let path=request.uri().path();
-    let costly=path=="/v1/governance/snapshot" || path=="/v1/governance/admin" || path=="/v1/governance/code" || path=="/v1/governance/release" || path=="/v1/network" || path.starts_with("/v1/transactions/") || path.starts_with("/v1/business/reviews/");
+    let costly=path=="/v1/governance/snapshot" || path=="/v1/governance/admin" || path=="/v1/governance/code" || path=="/v1/governance/release" || path=="/v1/network" || path.starts_with("/v1/wallet/contracts/") || path.starts_with("/v1/transactions/") || path.starts_with("/v1/business/reviews/");
     if !costly || request.method()!=axum::http::Method::GET {
         return next.run(request).await;
     }
@@ -643,6 +643,41 @@ async fn observer_head(
 
 /// Recent *stored* public contract event IDs. Does not query live RPC, expose
 /// event XDR, infer private transfers or confirm settlement / fiat payout.
+/// Consent-triggered, bounded public Testnet contract-instance read.
+/// An existing Soroban C-address can be any contract, not necessarily a smart wallet.
+/// Never calls __check_auth, requests a signature, or makes financial claims.
+async fn public_contract_instance(
+ State(state):State<Arc<AppState>>,Path(address):Path<String>,
+)->Result<Json<Value>,StatusCode>{
+ let key=crate::smart_account::instance_ledger_key(&address).ok_or(StatusCode::BAD_REQUEST)?;
+ let head=state.network().await.map_err(|_|StatusCode::BAD_GATEWAY)?;
+ let now=SystemTime::now().duration_since(UNIX_EPOCH)
+  .map_err(|_|StatusCode::BAD_GATEWAY)?.as_secs();
+ if !ledger_is_fresh(&head.ledger_closed_at_unix,now,180){
+  return Err(StatusCode::SERVICE_UNAVAILABLE);
+ }
+ let result=state.rpc_with_params("getLedgerEntries",Some(json!({
+  "keys":[key.clone()],"xdrFormat":"base64"
+ }))).await.map_err(|_|StatusCode::BAD_GATEWAY)?;
+ let entry=crate::smart_account::inspect_entry(&result,head.ledger_sequence,&key)
+  .map_err(|_|StatusCode::BAD_GATEWAY)?;
+ let found=entry.is_some();
+ Ok(Json(json!({
+  "schema_version":1,"network":"testnet",
+  "source":"stellar-rpc/getLedgerEntries",
+  "contract_address":address,
+  "contract_instance_found":found,
+  "observed_ledger_sequence":result["latestLedger"],
+  "executable_wasm_hash":entry.as_ref().map(|v|v["executable_wasm_hash"].clone()),
+  "live_until_ledger":entry.as_ref().map(|v|v["live_until_ledger"].clone()),
+  "smart_account_verified":false,
+  "signer_authority_verified":false,
+  "privacy_verified":false,
+  "payment_execution_enabled":false,
+  "fee_collection_enabled":false
+ })))
+}
+
 async fn observer_activity(
  State(state):State<Arc<AppState>>,
  Query(options):Query<ledger_events::ActivityOptions>,
@@ -1067,6 +1102,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/observer",get(observer_head))
         .route("/v1/observer/activity",get(observer_activity))
         .route("/v1/observer/schema",get(observer_schema))
+        .route("/v1/wallet/contracts/{address}",get(public_contract_instance))
         .route("/v1/capabilities",get(capabilities))
         .route("/v1/platform/modules",get(crate::platform::platform_modules))
         .route("/v1/business/reviews/{organization}/{request_id}",get(business_review_status))
