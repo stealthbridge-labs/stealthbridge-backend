@@ -1,0 +1,60 @@
+name: Protected SQLx production migration gate
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Inspect pending SQLx migrations, or apply to an explicitly selected Neon production database"
+        type: choice
+        options:
+          - inspect
+          - apply
+        default: inspect
+        required: true
+      confirmation:
+        description: "For apply only, type APPLY_PRODUCTION_REVIEWED_SQLX"
+        type: string
+        required: false
+permissions:
+  contents: read
+jobs:
+  production-sqlx:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production-db
+    timeout-minutes: 18
+    env:
+      DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Validate additive SQLx file source and readiness parity
+        run: |
+          python3 scripts/validate_migrations.py
+          python3 -m unittest scripts/test_validate_migrations.py
+      - name: Require protected production database secret
+        run: |
+          if [ -z "${DATABASE_URL:-}" ]; then
+            echo "Protected production environment lacks PRODUCTION_DATABASE_URL" >&2
+            exit 1
+          fi
+      - name: Install reviewed SQLx 0.8 CLI
+        run: cargo install --locked --version 0.8.6 sqlx-cli --no-default-features --features postgres,rustls
+      - name: Inspect applied and pending schema versions
+        run: sqlx migrate info --source migrations
+      - name: Require explicit second confirmation for production-only DDL
+        if: inputs.mode == 'apply'
+        env:
+          APPROVAL_TEXT: ${{ inputs.confirmation }}
+        run: |
+          if [ "${APPROVAL_TEXT:-}" != 'APPLY_PRODUCTION_REVIEWED_SQLX' ]; then
+            echo "Type APPLY_PRODUCTION_REVIEWED_SQLX after selecting the correct Neon production branch" >&2
+            exit 1
+          fi
+      - name: Apply additive reviewed migrations (explicit production authorization only)
+        if: inputs.mode == 'apply'
+        run: sqlx migrate run --source migrations
+      - name: Verify post-apply registered SQLx migrations
+        if: inputs.mode == 'apply'
+        run: sqlx migrate info --source migrations
