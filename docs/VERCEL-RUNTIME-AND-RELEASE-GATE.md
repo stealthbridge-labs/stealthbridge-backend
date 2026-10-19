@@ -89,3 +89,9 @@ python3 scripts/smoke_testnet_http.py \
 No secrets should be placed in the command line. The test requires: usable `/health`, fresh Testnet RPC, network/capability safety flags false, disabled settlement POST (501), an actual same-ledger three-contract governance snapshot and no false claims about fee-collection, privacy verification, signing or authorization. The script now classifies Vercel platform failures explicitly.
 
 **Do not claim backend runtime health based solely on green CI or Vercel READY.** The staged smoke must pass with a reviewed deployment, and the new canonical release manifest, independent cryptographic verification and financial controls remain separate required milestones.
+
+## Observer SQLx schema visibility
+
+`GET /v1/observer/schema` is a safe public metadata-only diagnostic (never a schema dump or a worker status claim). It distinguishes `not-configured`, `unavailable`, `migrations-pending`, `schema-incomplete` and `current`. The `registered_migrations` field counts only successfully registered expected SQLx versions. It is not a permission to run financial flows, and `current` does not imply a deployed long-lived worker or retained events.
+
+As of the 19 October 2026 Neon primary read, **7 of 10 SQLx versions** are registered. The missing, additive source migrations are `202610130001` (login challenges), `202610130002` (public Testnet event journal), and `202610150001` (business review requests). A temporary Neon migration branch was used to verify creation of the missing tables; primary was **not** modified. The operator must apply all three reviewed SQLx files through the protected migration workflow with explicit authorization, ensuring SQLx checksums and `_sqlx_migrations` bookkeeping are registered, then verify this endpoint returns `current`. Separately provision one long-lived read-only worker, review start-ledger retention, and test live activity ingestion. Do not run the observer inside a Vercel Function.

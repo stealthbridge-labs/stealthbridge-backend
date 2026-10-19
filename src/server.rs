@@ -660,6 +660,48 @@ async fn observer_activity(
     }).map(Json)
 }
 
+/// Explain the public observer database gate without exposing credentials,
+/// schema contents, table data, wallet information, or payment authorization.
+/// This endpoint checks SQLx metadata, not the worker process itself.
+#[derive(Serialize)]
+struct ObserverSchemaReport {
+ schema_version:u8,
+ network:&'static str,
+ source:&'static str,
+ schema_status:&'static str,
+ registered_migrations:Option<i64>,
+ required_migrations:usize,
+ payment_execution_enabled:bool,
+ fee_collection_enabled:bool,
+}
+fn observer_schema_projection(configured:bool,registered:Option<i64>,ready:bool)->ObserverSchemaReport{
+ let status=if !configured{"not-configured"}
+  else if registered.is_none(){"unavailable"}
+  else if registered!=Some(REQUIRED_SCHEMA_VERSIONS.len() as i64){"migrations-pending"}
+  else if ready{"current"}else{"schema-incomplete"};
+ ObserverSchemaReport{
+  schema_version:1,network:"testnet",source:"postgresql-sqlx-migrations",
+  schema_status:status,registered_migrations:registered,
+  required_migrations:REQUIRED_SCHEMA_VERSIONS.len(),
+  payment_execution_enabled:false,fee_collection_enabled:false,
+ }
+}
+async fn observer_schema(State(state):State<Arc<AppState>>)->Json<ObserverSchemaReport>{
+ let Some(pool)=state.db.as_ref() else{
+  return Json(observer_schema_projection(false,None,false));
+ };
+ // A successful TCP connection is insufficient. The exact audited migration
+ // IDs and required relations must both pass before reporting current schema.
+ let registered=tokio::time::timeout(Duration::from_secs(3),
+  sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM _sqlx_migrations WHERE success = TRUE AND version = ANY($1::bigint[])")
+   .bind(REQUIRED_SCHEMA_VERSIONS.as_slice()).fetch_one(pool)
+ ).await.ok().and_then(Result::ok);
+ let ready=if registered==Some(REQUIRED_SCHEMA_VERSIONS.len() as i64){
+  database_schema_ready(pool).await
+ }else{false};
+ Json(observer_schema_projection(true,registered,ready))
+}
+
 /// Must be enabled explicitly with STEALTHBRIDGE_ENABLE_LEDGER_OBSERVER=true.
 /// Run one designated observer per environment to avoid redundant RPC polling.
 pub async fn run_ledger_observer(state:AppState) {
@@ -1024,6 +1066,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/network",get(network))
         .route("/v1/observer",get(observer_head))
         .route("/v1/observer/activity",get(observer_activity))
+        .route("/v1/observer/schema",get(observer_schema))
         .route("/v1/capabilities",get(capabilities))
         .route("/v1/platform/modules",get(crate::platform::platform_modules))
         .route("/v1/business/reviews/{organization}/{request_id}",get(business_review_status))
@@ -1045,6 +1088,19 @@ pub fn router(state: AppState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn schema_diagnostics_distinguish_pending_unavailable_and_current(){
+        let missing=observer_schema_projection(true,Some(7),false);
+        assert_eq!(missing.schema_status,"migrations-pending");
+        assert_eq!(missing.registered_migrations,Some(7));
+        assert_eq!(missing.required_migrations,10);
+        assert!(!missing.payment_execution_enabled);
+        assert!(!missing.fee_collection_enabled);
+        assert_eq!(observer_schema_projection(false,None,false).schema_status,"not-configured");
+        assert_eq!(observer_schema_projection(true,None,false).schema_status,"unavailable");
+        assert_eq!(observer_schema_projection(true,Some(10),false).schema_status,"schema-incomplete");
+        assert_eq!(observer_schema_projection(true,Some(10),true).schema_status,"current");
+    }
     #[tokio::test]
     async fn signed_tenant_review_reads_hide_identity_and_respect_revocation() {
         use tower::ServiceExt;

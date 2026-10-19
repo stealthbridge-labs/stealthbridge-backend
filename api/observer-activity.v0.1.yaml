@@ -6,6 +6,31 @@ info:
     Additive preview-read extension to canonical API v0.3. Stored historical
     PUBLIC contract event metadata only. No on-chain execution verification.
 paths:
+  /v1/observer/schema:
+    get:
+      operationId: observerSchema
+      summary: Diagnose public observer SQLx migration readiness without exposing data
+      description: >
+        Read-only database metadata. A current schema does NOT verify that a
+        long-lived observer worker is running or that private payments work.
+      responses:
+        "200":
+          description: Safe status projection even when PostgreSQL is unavailable
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [schema_version, network, source, schema_status, registered_migrations,
+                  required_migrations, payment_execution_enabled, fee_collection_enabled]
+                properties:
+                  schema_version: {type: integer, const: 1}
+                  network: {type: string, const: testnet}
+                  source: {type: string, const: postgresql-sqlx-migrations}
+                  schema_status: {type: string, enum: [not-configured, unavailable, migrations-pending, schema-incomplete, current]}
+                  registered_migrations: {type: [integer, 'null'], minimum: 0}
+                  required_migrations: {type: integer, const: 10}
+                  payment_execution_enabled: {type: boolean, const: false}
+                  fee_collection_enabled: {type: boolean, const: false}
   /v1/observer/activity:
     get:
       operationId: observerActivity
