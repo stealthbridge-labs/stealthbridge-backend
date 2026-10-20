@@ -15,3 +15,14 @@ Release checks:
 Matching source files do not establish on-chain deployment. This document does not claim CI automation or live staging acceptance.
 
 Related issues: #9, #10, #13.
+
+## Consent-based C-address recipient preflight
+
+The existing `GET /v1/wallet/contracts/{address}` is a public instance-presence
+read, not a counterparty attestation. It requires checksum-valid StrKey input,
+a fresh Testnet head, a matching `getLedgerEntries` ledger/key, nonexpired TTL,
+and a parsed executable WASM hash when present. The endpoint now forces
+`Cache-Control: no-store` for both success and error responses. Consumers
+must never substitute a cached observation or infer smart-account authority,
+compatible token handling, private-payment capability or permission to settle.
+No schema, signing API, state transition or payment handler was added.
