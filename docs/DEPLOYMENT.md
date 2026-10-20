@@ -143,3 +143,29 @@ Record the exact green workflow run URL and ledger hash/time as independent *cur
 `GET /v1/observer` still exposes only the **persisted public** Stellar Testnet checkpoint and never falls back to a made-up live ledger. The handler now has a bounded two-second PostgreSQL response budget; missing database returns 503 and absent actual checkpoint returns 404. Before returning any stored row, the backend verifies a positive ledger sequence, a 64-hex-character public ledger hash, a positive canonical decimal close timestamp fitting `u64`, and the `stellar-rpc` source identifier. A corrupt stored row returns 503 rather than green source attribution.
 
 A syntactically valid persisted checkpoint is **not** proof that the observer is currently running or that a financial transaction succeeded. The frontend and SDK must separately measure freshness using `/v1/network` and check dependent status/capability flags. This endpoint neither submits Soroban operations nor reads private token data.
+
+
+## Public API hostname vs operator-only administration
+
+The production backend hostname is **not** a private operator dashboard.
+Its root route `GET /` intentionally returns `404 NOT_FOUND` with a request
+trace ID; deleting the deployment because of that response would break the
+customer website. Use `GET /health` for process liveness and `GET /ready`
+for dependency readiness (neither is payment readiness).
+
+Customer browsers use a narrow, same-origin frontend public proxy for fresh
+Testnet network status, contract presence and the first page of
+operator-configured corridor metadata. Client-facing financial submissions
+remain disabled, even when an API process is healthy.
+
+Operator-only diagnostics at `GET /internal/metrics` are unavailable until
+`STEALTHBRIDGE_METRICS_TOKEN` is set, then require a matching bearer token.
+Organization read endpoints require authenticated tenant-scoped sessions.
+Do not put operator tokens in browser code or `NEXT_PUBLIC_*` environment
+variables. Never rely on a hidden URL, CORS, `X-Robots-Tag`, or client-side
+route hiding for authorization.
+
+Backend responses now set `X-Robots-Tag: noindex, nofollow, noarchive` to
+discourage indexing. This does **not** hide public endpoints or grant privacy.
+A private operator console should be a separate authenticated interface, not
+a publicly exposed API root page.
