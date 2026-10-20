@@ -349,6 +349,58 @@ impl Corridor {
                 .is_none_or(|issuer| crate::wallet::decode_account_address(issuer).is_some())
     }
 }
+/// Stable, bounded service directory. No internal routes, tenant records or secrets.
+fn public_api_directory() -> Value {
+    json!({
+        "service":"stealthbridge-backend",
+        "network":"testnet",
+        "api_version":"v1",
+        "public_data":"read-only",
+        "payment_execution_enabled":false,
+        "fee_collection_enabled":false,
+        "confidential_payment_verified":false,
+        "fiat_payouts_enabled":false,
+        "routes":{
+            "process_health":"/health",
+            "dependency_readiness":"/ready",
+            "network":"/v1/network",
+            "capabilities":"/v1/capabilities",
+            "corridors":"/v1/corridors/page?limit=25",
+            "platform_modules":"/v1/platform/modules",
+            "governance_release":"/v1/governance/release",
+            "api_directory":"/v1"
+        },
+        "notice":"Liveness is not payment readiness. Public governance is not confidential settlement verification."
+    })
+}
+
+/// Browsers receive a self-contained landing page; API clients receive JSON.
+/// Content negotiation uses a fixed response, never reflects user input.
+async fn api_home(headers:HeaderMap) -> Response {
+    if headers.get(header::ACCEPT).and_then(|v|v.to_str().ok())
+        .is_some_and(|accept|accept.split(',').any(|part|part.trim().starts_with("text/html")))
+    {
+        let mut response=axum::response::Html(include_str!("api-landing.html")).into_response();
+        response.headers_mut().insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+        );
+        response.headers_mut().insert(header::CACHE_CONTROL,HeaderValue::from_static("no-store"));
+        response.headers_mut().insert(header::X_CONTENT_TYPE_OPTIONS,HeaderValue::from_static("nosniff"));
+        return response;
+    }
+    (
+        [(header::CACHE_CONTROL,HeaderValue::from_static("no-store")),
+         (header::X_CONTENT_TYPE_OPTIONS,HeaderValue::from_static("nosniff"))],
+        Json(public_api_directory())
+    ).into_response()
+}
+
+async fn api_directory() -> impl IntoResponse {
+    ([(header::CACHE_CONTROL,HeaderValue::from_static("no-store"))],
+     Json(public_api_directory()))
+}
+
 /// This endpoint is not evidence of chain connectivity; /v1/network verifies live RPC.
 async fn health() -> Json<Health> {
     Json(Health {status:"ok", service:"stealthbridge-backend"})
@@ -1103,6 +1155,8 @@ async fn business_review_status(
 pub fn router(state: AppState) -> Router {
     let state=Arc::new(state);
     Router::new()
+        .route("/",get(api_home))
+        .route("/v1",get(api_directory))
         .route("/health",get(health))
         .route("/ready",get(readiness))
         .route("/internal/metrics",get(internal_metrics))
@@ -1147,17 +1201,45 @@ mod tests {
         assert_eq!(forbidden.headers()[header::CACHE_CONTROL],"no-store");
     }
     #[tokio::test]
-    async fn api_root_returns_safe_404_and_backend_is_never_search_indexable(){
+    async fn api_root_has_safe_html_and_json_discovery_without_exposing_operator_routes(){
         use tower::ServiceExt;
         let app=router(AppState::without_db());
-        let root=app.clone().oneshot(Request::builder().uri("/")
+        let json_response=app.clone().oneshot(Request::builder().uri("/")
+            .header(header::ACCEPT,"application/json")
             .body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(root.status(),StatusCode::NOT_FOUND);
-        assert_eq!(root.headers()["x-robots-tag"],"noindex, nofollow, noarchive");
-        let body=to_bytes(root.into_body(),4096).await.unwrap();
-        let parsed:Value=serde_json::from_slice(&body).unwrap();
-        assert_eq!(parsed["error"]["code"],"NOT_FOUND");
-        assert!(parsed.get("database_url").is_none());
+        assert_eq!(json_response.status(),StatusCode::OK);
+        assert_eq!(json_response.headers()["x-robots-tag"],"noindex, nofollow, noarchive");
+        assert_eq!(json_response.headers()[header::CACHE_CONTROL],"no-store");
+        let bytes=to_bytes(json_response.into_body(),8192).await.unwrap();
+        let directory:Value=serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(directory["network"],"testnet");
+        assert_eq!(directory["payment_execution_enabled"],false);
+        assert_eq!(directory["fee_collection_enabled"],false);
+        assert_eq!(directory["routes"]["process_health"],"/health");
+        let serialized=directory.to_string();
+        assert!(!serialized.contains("/internal/metrics"));
+        assert!(!serialized.contains("/v1/business/reviews"));
+        assert!(!serialized.contains("DATABASE_URL"));
+        let browser=app.clone().oneshot(Request::builder().uri("/")
+            .header(header::ACCEPT,"text/html,application/xhtml+xml")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(browser.status(),StatusCode::OK);
+        assert!(browser.headers()[header::CONTENT_TYPE].to_str().unwrap().starts_with("text/html"));
+        assert_eq!(browser.headers()[header::CACHE_CONTROL],"no-store");
+        assert!(browser.headers().contains_key(header::CONTENT_SECURITY_POLICY));
+        let html_bytes=to_bytes(browser.into_body(),24*1024).await.unwrap();
+        let html=std::str::from_utf8(&html_bytes).unwrap();
+        assert!(html.contains("StealthBridge"));
+        assert!(html.contains("/v1/corridors/page"));
+        assert!(!html.contains("/internal/metrics"));
+        let v1=app.clone().oneshot(Request::builder().uri("/v1")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(v1.status(),StatusCode::OK);
+        let v1_data:Value=serde_json::from_slice(&to_bytes(v1.into_body(),8192).await.unwrap()).unwrap();
+        assert_eq!(v1_data,directory);
+        let forbidden=app.clone().oneshot(Request::builder().method("POST").uri("/")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(forbidden.status(),StatusCode::METHOD_NOT_ALLOWED);
         let liveness=app.oneshot(Request::builder().uri("/health")
             .body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(liveness.status(),StatusCode::OK);
