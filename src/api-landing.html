@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow, noarchive">
+<title>StealthBridge · API Infrastructure</title>
+<style>
+:root{color-scheme:dark;font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(ellipse at 80% 0%,#174c49 0,transparent 48%),#071e24;color:#e7f8f3}
+main{max-width:960px;margin:auto;padding:48px 28px 72px}.brand{display:flex;align-items:center;gap:13px;font-weight:800;letter-spacing:-.03em;font-size:19px}
+.symbol{width:38px;height:38px;background:#b1f0d9;border-radius:12px;display:grid;place-items:center;color:#062b2d;font-size:24px}
+.kicker{font-size:12px;text-transform:uppercase;letter-spacing:.2em;color:#92d3c2;font-weight:800;margin-top:70px}
+h1{font-size:clamp(36px,6vw,65px);letter-spacing:-.065em;line-height:1.06;margin:17px 0 16px}
+p{font-size:15px;max-width:690px;color:#b3d2ca;line-height:1.8}
+.pills{display:flex;gap:10px;flex-wrap:wrap;margin:24px 0 48px}.pill{border:1px solid #2f645e;background:#133c3c;border-radius:999px;padding:9px 13px;font-size:12px;color:#ceeadf}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+a.tile{display:flex;flex-direction:column;padding:22px;border:1px solid #32615f;border-radius:15px;background:#10363a;text-decoration:none;color:#effcf8;min-width:0}
+a.tile:hover,a.tile:focus-visible{background:#1b4547;outline:2px solid #91e4cb;outline-offset:2px}
+.tile strong{font-size:14px}.tile code{font-size:12px;margin-top:12px;color:#a8e8d3;overflow-wrap:anywhere}
+.note{padding:20px 24px;border-left:3px solid #b8e2a5;background:#163b39;margin-top:34px;border-radius:0 12px 12px 0}
+.note strong{font-size:14px}.note p{font-size:13px;margin:6px 0 0}
+footer{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:44px;color:#8aada5;font-size:12px;border-top:1px solid #315553;padding-top:25px}
+footer a{color:#c0eddc}code{font-family:ui-monospace,monospace}
+@media(max-width:600px){main{padding:30px 19px 48px}.grid{grid-template-columns:1fr}.kicker{margin-top:50px}}
+</style>
+</head>
+<body>
+<main>
+<div class="brand"><span class="symbol" aria-hidden="true">↗</span><span>StealthBridge <span style="color:#93c7b9">/ Infrastructure</span></span></div>
+<div class="kicker">Stellar Testnet · Public API</div>
+<h1>Cross-border infrastructure, by design.</h1>
+<p>This is the public read-only API for StealthBridge. Explore network observations, available corridor metadata, and contract governance information. Private business data and operator controls require separate authorization.</p>
+<div class="pills"><span class="pill">Rust / Axum</span><span class="pill">Stellar Testnet</span><span class="pill">Financial execution disabled</span></div>
+<section aria-label="Public API routes">
+<div class="grid">
+<a class="tile" href="/health"><strong>Process health</strong><code>GET /health</code></a>
+<a class="tile" href="/ready"><strong>Dependency readiness</strong><code>GET /ready</code></a>
+<a class="tile" href="/v1/network"><strong>Current Testnet ledger</strong><code>GET /v1/network</code></a>
+<a class="tile" href="/v1/corridors/page?limit=25"><strong>Configured payment corridors</strong><code>GET /v1/corridors/page</code></a>
+<a class="tile" href="/v1/capabilities"><strong>Platform capabilities</strong><code>GET /v1/capabilities</code></a>
+<a class="tile" href="/v1/governance/release"><strong>Public governance release</strong><code>GET /v1/governance/release</code></a>
+<a class="tile" href="/v1/platform/modules"><strong>Platform modules</strong><code>GET /v1/platform/modules</code></a>
+<a class="tile" href="/v1"><strong>Machine-readable API directory</strong><code>GET /v1</code></a>
+</div>
+</section>
+<div class="note"><strong>Engineering status ≠ payment availability.</strong><p>A healthy API or observed governance deployment does not establish private payments, compliant fiat payouts, issuer verification, or permission to move funds. Payment submission and fee collection remain disabled.</p></div>
+<footer><span>© StealthBridge · Public infrastructure</span><a href="https://stealthbridge.vercel.app/">Open StealthBridge product ↗</a></footer>
+</main>
+</body>
+</html>
