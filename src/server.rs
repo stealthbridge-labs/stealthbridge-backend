@@ -998,6 +998,9 @@ async fn diagnostic_responses(request:Request<Body>,next:Next)->Response{
     }else{Response::from_parts(parts,body)};
     let mut response=response;
     response.headers_mut().insert("x-request-id",HeaderValue::from_str(&trace_id).expect("UUID is a valid header value"));
+    // The backend is a service API, never an indexed public destination.
+    // This discourages search engine indexing but is NOT authentication.
+    response.headers_mut().insert("x-robots-tag",HeaderValue::from_static("noindex, nofollow, noarchive"));
     // A contract instance is a time-sensitive public ledger observation, not
     // stable account identity. Never let intermediaries reuse stale presence.
     if path.starts_with("/v1/wallet/contracts/") {
@@ -1142,6 +1145,23 @@ mod tests {
             .body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(forbidden.status(),StatusCode::METHOD_NOT_ALLOWED);
         assert_eq!(forbidden.headers()[header::CACHE_CONTROL],"no-store");
+    }
+    #[tokio::test]
+    async fn api_root_returns_safe_404_and_backend_is_never_search_indexable(){
+        use tower::ServiceExt;
+        let app=router(AppState::without_db());
+        let root=app.clone().oneshot(Request::builder().uri("/")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(root.status(),StatusCode::NOT_FOUND);
+        assert_eq!(root.headers()["x-robots-tag"],"noindex, nofollow, noarchive");
+        let body=to_bytes(root.into_body(),4096).await.unwrap();
+        let parsed:Value=serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["error"]["code"],"NOT_FOUND");
+        assert!(parsed.get("database_url").is_none());
+        let liveness=app.oneshot(Request::builder().uri("/health")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(liveness.status(),StatusCode::OK);
+        assert_eq!(liveness.headers()["x-robots-tag"],"noindex, nofollow, noarchive");
     }
     #[test]
     fn schema_diagnostics_distinguish_pending_unavailable_and_current(){
