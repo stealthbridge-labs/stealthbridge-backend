@@ -998,6 +998,11 @@ async fn diagnostic_responses(request:Request<Body>,next:Next)->Response{
     }else{Response::from_parts(parts,body)};
     let mut response=response;
     response.headers_mut().insert("x-request-id",HeaderValue::from_str(&trace_id).expect("UUID is a valid header value"));
+    // A contract instance is a time-sensitive public ledger observation, not
+    // stable account identity. Never let intermediaries reuse stale presence.
+    if path.starts_with("/v1/wallet/contracts/") {
+        response.headers_mut().insert(header::CACHE_CONTROL,HeaderValue::from_static("no-store"));
+    }
     response
 }
 
@@ -1124,6 +1129,20 @@ pub fn router(state: AppState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn public_contract_inspection_is_get_only_uncacheable_and_strkey_validated(){
+        use tower::ServiceExt;
+        let app=router(AppState::without_db());
+        let path="/v1/wallet/contracts/not-a-stellar-contract";
+        let invalid=app.clone().oneshot(Request::builder().uri(path)
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(invalid.status(),StatusCode::BAD_REQUEST);
+        assert_eq!(invalid.headers()[header::CACHE_CONTROL],"no-store");
+        let forbidden=app.oneshot(Request::builder().method("POST").uri(path)
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(forbidden.status(),StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(forbidden.headers()[header::CACHE_CONTROL],"no-store");
+    }
     #[test]
     fn schema_diagnostics_distinguish_pending_unavailable_and_current(){
         let missing=observer_schema_projection(true,Some(7),false);
