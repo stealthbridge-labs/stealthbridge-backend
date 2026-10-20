@@ -148,10 +148,14 @@ A syntactically valid persisted checkpoint is **not** proof that the observer is
 ## Public API hostname vs operator-only administration
 
 The production backend hostname is **not** a private operator dashboard.
-Its root route `GET /` intentionally returns `404 NOT_FOUND` with a request
-trace ID; deleting the deployment because of that response would break the
-customer website. Use `GET /health` for process liveness and `GET /ready`
-for dependency readiness (neither is payment readiness).
+Its root route `GET /` serves an accessible public API directory for browsers
+(`Accept: text/html`) and a minimal JSON route manifest for API clients
+(`Accept: application/json`). `GET /v1` always returns the JSON route
+manifest. These are service discovery routes only, not an operator console
+and not proof that the underlying payment infrastructure is available.
+Use `GET /health` for process liveness and `GET /ready` for dependency
+readiness (neither is payment readiness). Root and directory are uncacheable,
+and HTML uses a restrictive Content Security Policy.
 
 Customer browsers use a narrow, same-origin frontend public proxy for fresh
 Testnet network status, contract presence and the first page of
@@ -169,3 +173,20 @@ Backend responses now set `X-Robots-Tag: noindex, nofollow, noarchive` to
 discourage indexing. This does **not** hide public endpoints or grant privacy.
 A private operator console should be a separate authenticated interface, not
 a publicly exposed API root page.
+
+
+## Operator acceptance for the public API directory
+
+Verify the exact production commit on Vercel before testing:
+```sh
+curl -fsS -H 'Accept: application/json' https://stealthbridge-backend.vercel.app/
+curl -fsS https://stealthbridge-backend.vercel.app/v1
+curl -fsS -H 'Accept: text/html' https://stealthbridge-backend.vercel.app/ -o /dev/null
+curl -fsS https://stealthbridge-backend.vercel.app/health
+```
+The directory must not list `/internal/metrics`, tenant review paths,
+operator credentials, database URLs or any signed-write operation. Neither
+the JSON directory nor the HTML landing page queries RPC or PostgreSQL;
+they cannot manufacture a green network state or preview payment eligibility.
+The HTML page links actual read-only routes, which may independently fail
+closed when the real dependency is unavailable.
