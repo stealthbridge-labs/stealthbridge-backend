@@ -60,7 +60,7 @@ fn account_for(
 )->Option<String>{
  let secret=secret.filter(|s|s.len()>=32)?;
  let account=headers.get("x-stealthbridge-account")?.to_str().ok()?;
- if wallet::decode_account_address(account).is_none(){return None;}
+ wallet::decode_account_address(account)?;
  let timestamp=headers.get("x-stealthbridge-issued-at")?.to_str().ok()?;
  if timestamp.len()>12||timestamp.is_empty()||
   !timestamp.bytes().all(|b|b.is_ascii_digit()){return None;}
