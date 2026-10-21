@@ -199,7 +199,7 @@ mod tests{
   let signed_headers=|method:&str,nonce:&str,body:&str|{
    let stamp=now_unix().to_string();
    let digest=if method=="PATCH"{hex::encode(Sha256::digest(body.as_bytes()))}else{String::new()};
-   let macdata=format!("{DOMAIN}\\n{method}\\n{PATH}\\n{account}\\n{stamp}\\n{nonce}\\n{digest}\\n");
+   let macdata=format!("{DOMAIN}\n{method}\n{PATH}\n{account}\n{stamp}\n{nonce}\n{digest}\n");
    let mut mac=Mac256::new_from_slice(key).unwrap();
    mac.update(macdata.as_bytes());
    let signature=hex::encode(mac.finalize().into_bytes());
