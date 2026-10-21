@@ -10,6 +10,7 @@ pub mod wallet;
 pub mod smart_account;
 pub mod org_auth;
 pub mod account_directory;
+pub mod account_profile;
 pub mod ledger_events;
 pub mod platform;
 pub mod approval_policy;
