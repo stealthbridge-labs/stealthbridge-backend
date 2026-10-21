@@ -138,7 +138,7 @@ fn rpc_http_client() -> Result<Client, reqwest::Error> {
 pub struct AppState {
     http: Client,
     rpc_url: String,
-    db: Option<PgPool>,
+    pub(crate) db: Option<PgPool>,
     rpc_permits: Arc<Semaphore>,
     rpc_rate_limit: Arc<Mutex<PublicReadLimiter>>,
     metrics_token:Option<String>,
