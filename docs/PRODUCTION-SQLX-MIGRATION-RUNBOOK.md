@@ -24,3 +24,31 @@ No customer data, event rows, transfers, or wallet keys are seeded. The migratio
 6. Deploy one supervised `ledger-observer` process **outside Vercel Functions** with an explicit Stellar Testnet C-address allowlist, start-ledger retention review and dedicated database lease. Confirm real cursor advancement before stating that observation history is active.
 
 The workflow is `workflow_dispatch` only. Normal Git commits never apply production DDL. StealthBridge payments, privacy verification, fee collection and wallet signing remain disabled.
+
+## Added customer-profile migration (21 October 2026)
+
+The source tree now additionally contains
+`202610210001_customer_profiles.sql`, creating optional
+`customer_profiles` and replay-guarding `customer_profile_update_receipts`.
+The readiness manifest expects eleven migration versions once this source is
+merged. It does **not** seed data, create wallet accounts, authorize payments,
+or bypass the three previously pending migrations.
+
+**Never execute it directly against primary Neon.** The approved
+`production-db` SQLx workflow must run the three earlier migrations and this
+new migration in exact sorted order after inspecting checksums, backup
+procedures, and branch identity. An apparent 503 from the customer profile
+service before approval is the correct failure mode; do not conceal that
+state with browser-local fake "saved" profiles.
+
+For a scoped Testnet user, the profile stores only a chosen display name,
+a declared interest in personal/business/both, and an optional self-reported
+two-letter country code. No KYC/legal identity, email, bank instruction,
+payout provider, membership, cryptographic key or balance is retained.
+An authenticated Next.js session signs requests through a private HMAC
+bridge and Rust validates path, HTTP method, 30-second freshness, exact
+SHA-256 body digest and a unique UUID. PostgreSQL commits one-use receipts
+and the profile change in a single transaction; replay cannot rewrite a
+profile. Sensitive production and preview secrets are already separate.
+Approval and retention policies for update receipts remain required before
+broad customer onboarding.
