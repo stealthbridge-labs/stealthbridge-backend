@@ -183,6 +183,68 @@ mod tests{
   assert!(serde_json::from_str::<ProfileChanges>(
    r#"{"display_name":"Alice","use_case":"personal","residence_country":null,"kyc_verified":true}"#).is_err());
  }
+ #[tokio::test]
+ async fn database_profile_is_optional_account_scoped_replay_resistant_and_nonfinancial(){
+  use axum::{body::{to_bytes,Body},http::Request};
+  use tower::ServiceExt;
+  let url=std::env::var("DATABASE_URL").expect("CI PostgreSQL");
+  let pool=PgPool::connect(&url).await.expect("connect");
+  sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+  let account="GC3YRVLB7IN7SNUYVWFUC6OD3QWJXCUZ4HOBNIPVGY7BZDVOYMDNX5TN";
+  let mut state=AppState::without_db();
+  state.db=Some(pool.clone());
+  let key=b"ci-test-profile-backend-only-hmac-secret";
+  state.account_bridge_secret=Some(Arc::new(key.to_vec()));
+  let app=crate::server::router(state);
+  let signed_headers=|method:&str,nonce:&str,body:&str|{
+   let stamp=now_unix().to_string();
+   let digest=if method=="PATCH"{hex::encode(Sha256::digest(body.as_bytes()))}else{String::new()};
+   let macdata=format!("{DOMAIN}\\n{method}\\n{PATH}\\n{account}\\n{stamp}\\n{nonce}\\n{digest}\\n");
+   let mut mac=Mac256::new_from_slice(key).unwrap();
+   mac.update(macdata.as_bytes());
+   let signature=hex::encode(mac.finalize().into_bytes());
+   let mut request=Request::builder().method(method).uri(PATH)
+    .header("x-stealthbridge-account",account)
+    .header("x-stealthbridge-issued-at",stamp)
+    .header("x-stealthbridge-signature",signature);
+   if !nonce.is_empty(){request=request.header("x-stealthbridge-nonce",nonce);}
+   request
+  };
+  let before=app.clone().oneshot(signed_headers("GET","","").body(Body::empty()).unwrap())
+   .await.unwrap();
+  assert_eq!(before.status(),StatusCode::OK);
+  let json:serde_json::Value=serde_json::from_slice(&to_bytes(before.into_body(),4096).await.unwrap()).unwrap();
+  assert!(json["profile"].is_null());
+  let body=r#"{"display_name":"StealthBridge Account","use_case":"both","residence_country":"NG"}"#;
+  let id=Uuid::new_v4().to_string();
+  let update=app.clone().oneshot(signed_headers("PATCH",&id,body).body(Body::from(body)).unwrap())
+   .await.unwrap();
+  assert_eq!(update.status(),StatusCode::OK);
+  let json:serde_json::Value=serde_json::from_slice(&to_bytes(update.into_body(),4096).await.unwrap()).unwrap();
+  assert_eq!(json["profile"]["display_name"],"StealthBridge Account");
+  assert_eq!(json["payment_execution_enabled"],false);
+  assert_eq!(json["organization_payment_authorized"],false);
+  let replay=app.clone().oneshot(signed_headers("PATCH",&id,body).body(Body::from(body)).unwrap())
+   .await.unwrap();
+  assert_eq!(replay.status(),StatusCode::CONFLICT);
+  let wrong=r#"{"display_name":"Altered","use_case":"personal","residence_country":null}"#;
+  let tampered=app.clone().oneshot(signed_headers("PATCH",&Uuid::new_v4().to_string(),body)
+   .body(Body::from(wrong)).unwrap()).await.unwrap();
+  assert_eq!(tampered.status(),StatusCode::UNAUTHORIZED);
+  let forged=r#"{"display_name":"Altered","use_case":"personal","residence_country":null,"kyc_verified":true}"#;
+  let invalid=app.clone().oneshot(signed_headers("PATCH",&Uuid::new_v4().to_string(),forged)
+   .body(Body::from(forged)).unwrap()).await.unwrap();
+  assert_eq!(invalid.status(),StatusCode::BAD_REQUEST);
+  let after=app.clone().oneshot(signed_headers("GET","","").body(Body::empty()).unwrap())
+   .await.unwrap();
+  let saved:serde_json::Value=serde_json::from_slice(&to_bytes(after.into_body(),4096).await.unwrap()).unwrap();
+  assert_eq!(saved["profile"]["display_name"],"StealthBridge Account");
+  // CI-only fixtures are cleaned in dependency order.
+  sqlx::query("DELETE FROM customer_profile_update_receipts WHERE account_address=$1")
+    .bind(account).execute(&pool).await.unwrap();
+  sqlx::query("DELETE FROM customer_profiles WHERE account_address=$1")
+    .bind(account).execute(&pool).await.unwrap();
+ }
  #[test]
  fn request_context_cannot_change_method_nonce_or_digest(){
   let secret=b"test-secret-more-than-thirty-two-characters";
