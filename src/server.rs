@@ -927,16 +927,18 @@ pub async fn run_ledger_observer(state:AppState) {
 /// The expected schema is deliberately versioned alongside the seven
 /// operator-run SQLx migrations. A successful TCP/SELECT 1 alone is not
 /// sufficient: the runtime must have its catalog and internal safeguards.
-const REQUIRED_SCHEMA_VERSIONS: [i64; 10] = [
+const REQUIRED_SCHEMA_VERSIONS: [i64; 11] = [
     202610080001, 202610080002, 202610080003, 202610080004,
     202610080005, 202610080006, 202610100001,
-    202610130001, 202610130002, 202610150001,
+    202610130001, 202610130002, 202610150001, 202610210001,
 ];
 
 async fn database_schema_ready(pool: &PgPool) -> bool {
     // No implicit migrations, modifications, or sensitive table reads.
     // SQLx success flags and essential relations are checked in one SELECT.
-    const QUERY: &str = "SELECT COUNT(*) = 10 \
+    const QUERY: &str = "SELECT COUNT(*) = 11 \
+         AND to_regclass('customer_profiles') IS NOT NULL \
+         AND to_regclass('customer_profile_update_receipts') IS NOT NULL \
          AND to_regclass('business_review_requests') IS NOT NULL \
          AND to_regclass('business_review_records') IS NOT NULL \
          AND to_regclass('organization_login_challenges') IS NOT NULL \
@@ -1169,6 +1171,9 @@ pub fn router(state: AppState) -> Router {
         .route("/internal/metrics",get(internal_metrics))
         .route("/v1/network",get(network))
         .route("/v1/account/directory",get(crate::account_directory::account_directory))
+        .route("/v1/account/profile",get(crate::account_profile::get_profile)
+          .patch(crate::account_profile::patch_profile)
+          .layer(axum::extract::DefaultBodyLimit::max(1024)))
         .route("/v1/observer",get(observer_head))
         .route("/v1/observer/activity",get(observer_activity))
         .route("/v1/observer/schema",get(observer_schema))
@@ -1258,13 +1263,13 @@ mod tests {
         let missing=observer_schema_projection(true,Some(7),false);
         assert_eq!(missing.schema_status,"migrations-pending");
         assert_eq!(missing.registered_migrations,Some(7));
-        assert_eq!(missing.required_migrations,10);
+        assert_eq!(missing.required_migrations,11);
         assert!(!missing.payment_execution_enabled);
         assert!(!missing.fee_collection_enabled);
         assert_eq!(observer_schema_projection(false,None,false).schema_status,"not-configured");
         assert_eq!(observer_schema_projection(true,None,false).schema_status,"unavailable");
-        assert_eq!(observer_schema_projection(true,Some(10),false).schema_status,"schema-incomplete");
-        assert_eq!(observer_schema_projection(true,Some(10),true).schema_status,"current");
+        assert_eq!(observer_schema_projection(true,Some(11),false).schema_status,"schema-incomplete");
+        assert_eq!(observer_schema_projection(true,Some(11),true).schema_status,"current");
     }
     #[tokio::test]
     async fn signed_tenant_review_reads_hide_identity_and_respect_revocation() {
