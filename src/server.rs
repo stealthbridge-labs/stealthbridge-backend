@@ -144,6 +144,7 @@ pub struct AppState {
     metrics_token:Option<String>,
     session_domain:Option<String>,
     session_secret:Option<Arc<Vec<u8>>>,
+    pub(crate) account_bridge_secret:Option<Arc<Vec<u8>>>,
     metrics:Arc<ReadinessMetrics>,
 }
 
@@ -202,9 +203,15 @@ impl AppState {
         {
             return Err("Trusted review auth requires domain and secret (>=32 bytes) together".into());
         }
+        let account_bridge_secret=env::var("STEALTHBRIDGE_ACCOUNT_BRIDGE_SECRET")
+            .ok().filter(|s|!s.is_empty());
+        if account_bridge_secret.as_ref().is_some_and(|s|s.len()<32){
+            return Err("STEALTHBRIDGE_ACCOUNT_BRIDGE_SECRET must be >=32 bytes".into());
+        }
         Ok(Self {http,rpc_url,db,rpc_permits:Arc::new(Semaphore::new(MAX_IN_FLIGHT_RPC)),
             rpc_rate_limit:Arc::new(Mutex::new(PublicReadLimiter::new(configured_read_limit()?))),
             metrics_token,session_domain,session_secret:session_secret.map(|s|Arc::new(s.into_bytes())),
+            account_bridge_secret:account_bridge_secret.map(|s|Arc::new(s.into_bytes())),
             metrics:Arc::new(ReadinessMetrics::default())})
     }
 
@@ -217,7 +224,7 @@ impl AppState {
             rpc_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT_RPC)),
             rpc_rate_limit: Arc::new(Mutex::new(PublicReadLimiter::new(DEFAULT_RPC_READS_PER_MINUTE))),
             metrics_token:None,
-            session_domain:None, session_secret:None,
+            session_domain:None, session_secret:None, account_bridge_secret:None,
             metrics:Arc::new(ReadinessMetrics::default()),
         }
     }
@@ -1161,6 +1168,7 @@ pub fn router(state: AppState) -> Router {
         .route("/ready",get(readiness))
         .route("/internal/metrics",get(internal_metrics))
         .route("/v1/network",get(network))
+        .route("/v1/account/directory",get(crate::account_directory::account_directory))
         .route("/v1/observer",get(observer_head))
         .route("/v1/observer/activity",get(observer_activity))
         .route("/v1/observer/schema",get(observer_schema))
