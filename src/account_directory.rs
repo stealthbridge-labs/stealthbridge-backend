@@ -55,10 +55,10 @@ async fn member_rows(pool:&PgPool,account:&str)->Result<(Vec<OrganizationMembers
     // arbitrary path parameter or query string. Suspended tenants and
     // revoked members must never appear in the customer directory.
     let rows=sqlx::query(
-        "SELECT o.id,o.display_name,m.role FROM organization_members m \\
-         INNER JOIN organizations o ON o.id=m.organization_id \\
-         WHERE m.subject=$1 AND m.revoked_at IS NULL AND o.status='active' \\
-         ORDER BY o.created_at,o.id LIMIT 26"
+        r#"SELECT o.id,o.display_name,m.role FROM organization_members m
+           INNER JOIN organizations o ON o.id=m.organization_id
+           WHERE m.subject=$1 AND m.revoked_at IS NULL AND o.status='active'
+           ORDER BY o.created_at,o.id LIMIT 26"#
     ).bind(account).fetch_all(pool).await?;
     let has_more=rows.len()>MAX_MEMBER_ROWS;
     let mut organizations=Vec::with_capacity(rows.len().min(MAX_MEMBER_ROWS));
