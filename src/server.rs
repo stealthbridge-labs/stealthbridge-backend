@@ -1171,6 +1171,10 @@ pub fn router(state: AppState) -> Router {
         .route("/internal/metrics",get(internal_metrics))
         .route("/v1/network",get(network))
         .route("/v1/account/directory",get(crate::account_directory::account_directory))
+        .route("/v1/account/business-onboarding",
+          get(crate::business_onboarding::list_business_applications)
+          .post(crate::business_onboarding::create_business_application)
+          .layer(axum::extract::DefaultBodyLimit::max(512)))
         .route("/v1/account/profile",get(crate::account_profile::get_profile)
           .patch(crate::account_profile::patch_profile)
           .layer(axum::extract::DefaultBodyLimit::max(1024)))
