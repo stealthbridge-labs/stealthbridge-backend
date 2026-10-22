@@ -193,12 +193,52 @@ mod tests{
   assert!(verify_request(&headers,Some(secret),"POST",&nonce,&digest,now+31).is_none());
   assert!(verify_request(&headers,None,"POST",&nonce,&digest,now).is_none());
  }
+ #[tokio::test]
+ async fn pending_registration_is_persisted_replay_safe_and_never_activates_payments(){
+  let url=std::env::var("DATABASE_URL").expect("CI PostgreSQL");
+  let pool=PgPool::connect(&url).await.expect("CI db");
+  sqlx::migrate!("./migrations").run(&pool).await.expect("schema");
+  let account="GC3YRVLB7IN7SNUYVWFUC6OD3QWJXCUZ4HOBNIPVGY7BZDVOYMDNX5TN";
+  let orgs=sqlx::query_scalar::<_,Uuid>(
+    "SELECT o.id FROM organizations o JOIN organization_members m ON m.organization_id=o.id
+     WHERE m.subject=$1 AND o.display_name LIKE 'CI ONLY PENDING ONBOARDING %'")
+     .bind(account).fetch_all(&pool).await.unwrap();
+  assert!(orgs.is_empty(),"CI fixtures must be clean at test start");
+  let ids:Vec<Uuid>=(0..3).map(|_|Uuid::new_v4()).collect();
+  for (i,id) in ids.iter().enumerate(){
+    let business=format!("CI ONLY PENDING ONBOARDING {i}");
+    let entry=create_pending(&pool,account,*id,&business).await.expect("pending");
+    assert_eq!(entry.status,"pending");
+    assert_eq!(entry.role,"owner");
+  }
+  assert!(matches!(
+   create_pending(&pool,account,ids[0],"CI ONLY DUPLICATE").await,
+   Err(CreateError::Replay)
+  ));
+  assert!(matches!(
+   create_pending(&pool,account,Uuid::new_v4(),"CI ONLY FOURTH").await,
+   Err(CreateError::Limit)
+  ));
+  let (pending,more)=list_pending(&pool,account).await.unwrap();
+  assert!(pending.iter().filter(|row|ids.contains(&row.id)).count()==3);
+  assert!(!more);
+  for id in ids{
+   let status:String=sqlx::query_scalar("SELECT status FROM organizations WHERE id=$1")
+     .bind(id).fetch_one(&pool).await.unwrap();
+   assert_eq!(status,"pending");
+   sqlx::query("DELETE FROM organization_members WHERE organization_id=$1")
+     .bind(id).execute(&pool).await.unwrap();
+   sqlx::query("DELETE FROM organizations WHERE id=$1")
+     .bind(id).execute(&pool).await.unwrap();
+  }
+ }
  #[test]
  fn application_name_is_not_legal_verification(){
   assert!(ApplicationInput{display_name:"Independent importer".into()}.valid());
-  for value in ["","  Untrimmed","<script>","a\nnewline","a".repeat(121).as_str()]{
+  for value in ["","  Untrimmed","<script>","a\nnewline"]{
    assert!(!ApplicationInput{display_name:value.into()}.valid());
   }
+  assert!(!ApplicationInput{display_name:"a".repeat(121)}.valid());
   assert!(serde_json::from_str::<ApplicationInput>(
    r#"{"display_name":"Acme","kyc_verified":true}"#).is_err());
  }
