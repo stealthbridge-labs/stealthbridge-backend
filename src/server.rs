@@ -1171,6 +1171,8 @@ pub fn router(state: AppState) -> Router {
         .route("/internal/metrics",get(internal_metrics))
         .route("/v1/network",get(network))
         .route("/v1/account/directory",get(crate::account_directory::account_directory))
+        .route("/v1/account/organizations/{id}/team",
+            get(crate::organization_team::get_organization_team))
         .route("/v1/account/business-onboarding",
           get(crate::business_onboarding::list_business_applications)
           .post(crate::business_onboarding::create_business_application)
