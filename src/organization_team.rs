@@ -282,8 +282,11 @@ pub async fn get_organization_team(
 #[cfg(test)]
 mod tests {
     use super::*;
-    const OWNER: &str = "GC3YRVLB7IN7SNUYVWFUC6OD3QWJXCUZ4HOBNIPVGY7BZDVOYMDNX5TN";
-    const OTHER: &str = "GAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB7JZX";
+    // Use a different CI public address from business_onboarding tests: the
+    // latter intentionally caps pending applications per signer, and Rust
+    // executes tests concurrently against the same ephemeral PostgreSQL.
+    const OWNER: &str = "GAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB7JZX";
+    const OTHER: &str = "GC3YRVLB7IN7SNUYVWFUC6OD3QWJXCUZ4HOBNIPVGY7BZDVOYMDNX5TN";
 
     fn signed_headers(
         secret: &[u8],
