@@ -243,3 +243,403 @@ mod tests{
    r#"{"display_name":"Acme","kyc_verified":true}"#).is_err());
  }
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AmendmentInput {
+    organization_id: Uuid,
+    expected_display_name: String,
+    display_name: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WithdrawalInput {
+    organization_id: Uuid,
+    confirm_display_name: String,
+}
+fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 120
+        && name.trim() == name
+        && !name.chars().any(|c| c.is_control() || c == '<' || c == '>')
+}
+#[derive(Debug)]
+enum ChangeError {
+    NotFound,
+    Conflict,
+    Database(sqlx::Error),
+}
+impl From<sqlx::Error> for ChangeError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Database(error)
+    }
+}
+async fn lock_pending_owner(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    account: &str,
+    organization: Uuid,
+) -> Result<String, ChangeError> {
+    let row = sqlx::query(
+        "SELECT o.display_name,o.status FROM organizations o \
+   JOIN organization_members m ON m.organization_id=o.id \
+   WHERE o.id=$1 AND m.subject=$2 AND m.role='owner' \
+   AND m.revoked_at IS NULL FOR UPDATE OF o,m",
+    )
+    .bind(organization)
+    .bind(account)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or(ChangeError::NotFound)?;
+    let status: String = row.try_get("status")?;
+    if status != "pending" {
+        return Err(ChangeError::NotFound);
+    }
+    let name: String = row.try_get("display_name")?;
+    Ok(name)
+}
+async fn amend_pending(
+    pool: &PgPool,
+    account: &str,
+    organization: Uuid,
+    expected: &str,
+    name: &str,
+) -> Result<PendingBusiness, ChangeError> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,731))")
+        .bind(account)
+        .execute(&mut *tx)
+        .await?;
+    let current = lock_pending_owner(&mut tx, account, organization).await?;
+    if current != expected {
+        return Err(ChangeError::Conflict);
+    }
+    if current == name {
+        return Err(ChangeError::Conflict);
+    }
+    let members: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM organization_members WHERE organization_id=$1")
+            .bind(organization)
+            .fetch_one(&mut *tx)
+            .await?;
+    if members != 1 {
+        return Err(ChangeError::Conflict);
+    }
+    let changed=sqlx::query(
+  "UPDATE organizations SET display_name=$1 WHERE id=$2 AND status='pending' AND display_name=$3"
+ ).bind(name).bind(organization).bind(expected).execute(&mut *tx).await?;
+    if changed.rows_affected() != 1 {
+        return Err(ChangeError::Conflict);
+    }
+    tx.commit().await?;
+    Ok(PendingBusiness {
+        id: organization,
+        display_name: name.to_string(),
+        status: "pending",
+        role: "owner",
+    })
+}
+async fn withdraw_pending(
+    pool: &PgPool,
+    account: &str,
+    organization: Uuid,
+    confirmation: &str,
+) -> Result<(), ChangeError> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,731))")
+        .bind(account)
+        .execute(&mut *tx)
+        .await?;
+    let current = lock_pending_owner(&mut tx, account, organization).await?;
+    if current != confirmation {
+        return Err(ChangeError::Conflict);
+    }
+    // Only an untouched single-owner application may be withdrawn. Reject
+    // all financial journal rows, including historical rows without org FK.
+    let members: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM organization_members WHERE organization_id=$1")
+            .bind(organization)
+            .fetch_one(&mut *tx)
+            .await?;
+    let had_settlements: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM settlement_intents WHERE organization_id=$1)",
+    )
+    .bind(organization)
+    .fetch_one(&mut *tx)
+    .await?;
+    let had_provider_events: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM provider_event_inbox WHERE organization_id=$1)",
+    )
+    .bind(organization)
+    .fetch_one(&mut *tx)
+    .await?;
+    if members != 1 || had_settlements || had_provider_events {
+        return Err(ChangeError::Conflict);
+    }
+    // Other foreign keys (review, login challenge, future tables) are RESTRICT,
+    // so the DB transaction rolls back rather than losing linked evidence.
+    let removed = sqlx::query(
+        "DELETE FROM organization_members WHERE organization_id=$1 AND subject=$2 \
+   AND role='owner' AND revoked_at IS NULL",
+    )
+    .bind(organization)
+    .bind(account)
+    .execute(&mut *tx)
+    .await?;
+    if removed.rows_affected() != 1 {
+        return Err(ChangeError::Conflict);
+    }
+    let removed = sqlx::query("DELETE FROM organizations WHERE id=$1 AND status='pending'")
+        .bind(organization)
+        .execute(&mut *tx)
+        .await?;
+    if removed.rows_affected() != 1 {
+        return Err(ChangeError::Conflict);
+    }
+    tx.commit().await?;
+    Ok(())
+}
+/// Correct a pending, unreviewed business name. A stale expected name fails
+/// rather than overwriting a more recent change.
+pub async fn amend_business_application(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Some(secret) = signing_key(&state) else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    if body.is_empty() || body.len() > 512 {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let Some(request_id) = headers
+        .get("x-stealthbridge-request-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| Uuid::parse_str(v).ok())
+        .filter(|id| !id.is_nil())
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let digest = hex::encode(Sha256::digest(&body));
+    let Some(account) = verify_request(
+        &headers,
+        Some(secret),
+        "PATCH",
+        &request_id.to_string(),
+        &digest,
+        now_unix(),
+    ) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let Ok(input) = serde_json::from_slice::<AmendmentInput>(&body) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if input.organization_id.is_nil()
+        || !valid_name(&input.expected_display_name)
+        || !valid_name(&input.display_name)
+        || input.expected_display_name == input.display_name
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let Some(pool) = state.db.as_ref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        amend_pending(
+            pool,
+            &account,
+            input.organization_id,
+            &input.expected_display_name,
+            &input.display_name,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(record)) => (
+            [
+                (
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static("private, no-store"),
+                ),
+                (
+                    header::X_CONTENT_TYPE_OPTIONS,
+                    HeaderValue::from_static("nosniff"),
+                ),
+            ],
+            Json(response_for(account, vec![record], false)),
+        )
+            .into_response(),
+        Ok(Err(ChangeError::NotFound)) => StatusCode::NOT_FOUND.into_response(),
+        Ok(Err(ChangeError::Conflict)) => StatusCode::CONFLICT.into_response(),
+        Ok(Err(ChangeError::Database(error))) => {
+            tracing::warn!(error=%error,"pending business amendment unavailable");
+            StatusCode::SERVICE_UNAVAILABLE.into_response()
+        }
+        _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+/// Irreversibly withdraw only an untouched pending application. This is NOT
+/// available for approved, suspended, or reviewed organizations.
+pub async fn withdraw_business_application(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Some(secret) = signing_key(&state) else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    if body.is_empty() || body.len() > 512 {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let Some(request_id) = headers
+        .get("x-stealthbridge-request-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| Uuid::parse_str(v).ok())
+        .filter(|id| !id.is_nil())
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let digest = hex::encode(Sha256::digest(&body));
+    let Some(account) = verify_request(
+        &headers,
+        Some(secret),
+        "DELETE",
+        &request_id.to_string(),
+        &digest,
+        now_unix(),
+    ) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let Ok(input) = serde_json::from_slice::<WithdrawalInput>(&body) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if input.organization_id.is_nil() || !valid_name(&input.confirm_display_name) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let Some(pool) = state.db.as_ref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        withdraw_pending(
+            pool,
+            &account,
+            input.organization_id,
+            &input.confirm_display_name,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(())) => (
+            [
+                (
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static("private, no-store"),
+                ),
+                (
+                    header::X_CONTENT_TYPE_OPTIONS,
+                    HeaderValue::from_static("nosniff"),
+                ),
+            ],
+            Json(response_for(account, vec![], false)),
+        )
+            .into_response(),
+        Ok(Err(ChangeError::NotFound)) => StatusCode::NOT_FOUND.into_response(),
+        Ok(Err(ChangeError::Conflict)) => StatusCode::CONFLICT.into_response(),
+        Ok(Err(ChangeError::Database(error))) => {
+            tracing::warn!(error=%error,"pending business withdrawal unavailable");
+            StatusCode::SERVICE_UNAVAILABLE.into_response()
+        }
+        _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod pending_management_tests {
+ use super::*;
+ // Separate from the other parallel Testnet onboarding and team fixtures.
+ const OWNER:&str="GBBCOFZZ3RDQHTC662EVM3UO5SAXQEZB6DL64HLEJYEYJ4KBVL3CDLTE";
+ const OTHER:&str="GAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB7JZX";
+ #[test]
+ fn amendment_shape_enforces_exact_pending_only_fields(){
+  assert!(serde_json::from_str::<AmendmentInput>(
+    r#"{"organization_id":"9a1a395f-249c-4907-b657-d48df4b38d28","expected_display_name":"Before","display_name":"After"}"#
+  ).is_ok());
+  for bad in [
+   r#"{"organization_id":"9a1a395f-249c-4907-b657-d48df4b38d28","display_name":"After","verified":true}"#,
+   r#"{"organization_id":"bad","expected_display_name":"Before","display_name":"After"}"#
+  ] {assert!(serde_json::from_str::<AmendmentInput>(bad).is_err());}
+  assert!(serde_json::from_str::<WithdrawalInput>(
+   r#"{"organization_id":"9a1a395f-249c-4907-b657-d48df4b38d28","confirm_display_name":"Before","approve_payments":true}"#
+  ).is_err());
+ }
+ #[test]
+ fn amended_and_withdrawn_requests_use_distinct_signed_method_and_body(){
+  const ACCOUNT:&str="GBBCOFZZ3RDQHTC662EVM3UO5SAXQEZB6DL64HLEJYEYJ4KBVL3CDLTE";
+  let key=b"CI-only-boundary-test-signature-key-12345678";
+  let now=1_800_000_000_i64;
+  let request=Uuid::new_v4().to_string();
+  let digest=hex::encode(Sha256::digest(b"CI-only-body"));
+  for method in ["PATCH","DELETE"] {
+   let message=format!("{DOMAIN}\n{method}\n{PATH}\n{ACCOUNT}\n{now}\n{request}\n{digest}\n");
+   let mut mac=AuthMac::new_from_slice(key.as_slice()).unwrap();
+   mac.update(message.as_bytes());
+   let signature=hex::encode(mac.finalize().into_bytes());
+   let mut headers=HeaderMap::new();
+   headers.insert("x-stealthbridge-account",HeaderValue::from_static(ACCOUNT));
+   headers.insert("x-stealthbridge-issued-at",HeaderValue::from_str(&now.to_string()).unwrap());
+   headers.insert("x-stealthbridge-signature",HeaderValue::from_str(&signature).unwrap());
+   assert_eq!(verify_request(&headers,Some(key),method,&request,&digest,now),Some(ACCOUNT.to_string()));
+   assert!(verify_request(&headers,Some(key),if method=="PATCH"{"DELETE"}else{"PATCH"},&request,&digest,now).is_none());
+   assert!(verify_request(&headers,Some(key),method,"forged-id",&digest,now).is_none());
+   assert!(verify_request(&headers,Some(key),method,&request,"forged-body",now).is_none());
+   assert!(verify_request(&headers,Some(key),method,&request,&digest,now+31).is_none());
+  }
+ }
+ #[tokio::test]
+ async fn only_unused_pending_owner_applications_can_be_corrected_or_withdrawn(){
+  let url=std::env::var("DATABASE_URL").expect("isolated CI PostgreSQL");
+  let pool=PgPool::connect(&url).await.expect("CI db");
+  sqlx::migrate!("./migrations").run(&pool).await.expect("migrations");
+  let id=Uuid::new_v4();
+  assert!(wallet::decode_account_address(OWNER).is_some());
+  let first=create_pending(&pool,OWNER,id,"CI ONLY CORRECTION START")
+    .await.expect("create pending application");
+  assert_eq!(first.status,"pending");
+
+  assert!(matches!(amend_pending(&pool,OTHER,id,"CI ONLY CORRECTION START","CI ONLY FORGED")
+    .await,Err(ChangeError::NotFound)));
+  let result=amend_pending(&pool,OWNER,id,"CI ONLY CORRECTION START","CI ONLY CORRECTION FIXED")
+    .await.expect("owner can correct an untouched application");
+  assert_eq!(result.display_name,"CI ONLY CORRECTION FIXED");
+  assert!(matches!(amend_pending(&pool,OWNER,id,"CI ONLY CORRECTION START","CI ONLY REPLAYED")
+    .await,Err(ChangeError::Conflict)));
+  assert!(matches!(withdraw_pending(&pool,OTHER,id,"CI ONLY CORRECTION FIXED")
+    .await,Err(ChangeError::NotFound)));
+  assert!(matches!(withdraw_pending(&pool,OWNER,id,"CI ONLY INCORRECT NAME")
+    .await,Err(ChangeError::Conflict)));
+  // Existing other membership blocks destructive withdrawal, even if
+  // the organization is still marked pending in PostgreSQL.
+  sqlx::query("INSERT INTO organization_members(organization_id,subject,role) VALUES($1,$2,'viewer')")
+    .bind(id).bind(OTHER).execute(&pool).await.expect("add reviewer");
+  assert!(matches!(withdraw_pending(&pool,OWNER,id,"CI ONLY CORRECTION FIXED")
+    .await,Err(ChangeError::Conflict)));
+  sqlx::query("DELETE FROM organization_members WHERE organization_id=$1 AND subject=$2")
+    .bind(id).bind(OTHER).execute(&pool).await.expect("revoke fixture row");
+  sqlx::query("UPDATE organizations SET status='active' WHERE id=$1")
+    .bind(id).execute(&pool).await.expect("activate only in isolated test");
+  assert!(matches!(amend_pending(&pool,OWNER,id,"CI ONLY CORRECTION FIXED","CI ONLY FORGED")
+    .await,Err(ChangeError::NotFound)));
+  assert!(matches!(withdraw_pending(&pool,OWNER,id,"CI ONLY CORRECTION FIXED")
+    .await,Err(ChangeError::NotFound)));
+  sqlx::query("UPDATE organizations SET status='pending' WHERE id=$1")
+    .bind(id).execute(&pool).await.expect("return fixture to pending");
+  withdraw_pending(&pool,OWNER,id,"CI ONLY CORRECTION FIXED")
+    .await.expect("owner can withdraw unused, single-member application");
+  assert!(matches!(withdraw_pending(&pool,OWNER,id,"CI ONLY CORRECTION FIXED")
+    .await,Err(ChangeError::NotFound)));
+  assert!(sqlx::query_scalar::<_,Uuid>("SELECT id FROM organizations WHERE id=$1")
+    .bind(id).fetch_optional(&pool).await.unwrap().is_none());
+
+ }
+}

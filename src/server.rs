@@ -1176,6 +1176,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/account/business-onboarding",
           get(crate::business_onboarding::list_business_applications)
           .post(crate::business_onboarding::create_business_application)
+          .patch(crate::business_onboarding::amend_business_application)
+          .delete(crate::business_onboarding::withdraw_business_application)
           .layer(axum::extract::DefaultBodyLimit::max(512)))
         .route("/v1/account/profile",get(crate::account_profile::get_profile)
           .patch(crate::account_profile::patch_profile)
