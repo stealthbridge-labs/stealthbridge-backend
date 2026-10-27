@@ -19,7 +19,7 @@ METHOD
 /v1/account/team-invites
 verified-G-address
 Unix-seconds
-request-UUID-for-POST-or-empty
+request-UUID-for-POST, canonical-organization-UUID-for-scoped-GET, or empty-for-global-GET
 SHA256-of-exact-POST-body-or-empty
 
 ```
@@ -29,6 +29,6 @@ Rust checks the exact method/path/account/timestamp/body digest/nonce with const
 PostgreSQL checks the active organization and inviter membership under row locks. An accepted invite locks the organization and invite in a consistent order, re-checks the inviter's current owner/admin role, then inserts viewer membership and marks acceptance atomically. Acceptance and revocation are one-time transactions; duplicate membership or revocation history blocks restoration. The invitation table retains created, accepted and revoked timestamps, with a partial unique index to prevent concurrent open duplicates. Expired records are marked revoked only on reissue; the API still classifies them as expired using their timestamps.
 
 ## Limits and rollout
-The private GET returns up to twenty received and twenty sent records; `received_more`/`sent_more` disclose truncation. It does not expose raw tokens or payment data. Outgoing records are visible only to active organization owners/admins; incoming offers are visible only to the named signer, subject to the inviter still being an active owner/admin.
+The private unscoped GET returns up to twenty received and twenty sent records; `received_more`/`sent_more` disclose truncation. The signed `GET ?organization_id=<canonical-uuid>` scopes sent records to that particular organization (up to twenty), with no unrelated received records; duplicate, noncanonical and extraneous query parameters are rejected. The organization UUID is included in the existing signed request-ID field, so modifying the query invalidates the HMAC. A manager cannot retrieve another organization's sent records. There is not yet a next-page cursor; `sent_more` remains an explicit truncation warning. It does not expose raw tokens or payment data. Outgoing records are visible only to active organization owners/admins; incoming offers are visible only to the named signer, subject to the inviter still being an active owner/admin.
 
 Release sequence: test migrations and HMAC/role/replay cases in isolated CI PostgreSQL, verify staging on a protected Neon branch, independently approve production migration with SQLx checksum checks, enable the paired **server-side** release flag in both apps, deploy, and complete real two-account Freighter acceptance. Do not use synthetic rows in production. Rollback is disabling the feature flag; database rollback is not automatic and must preserve invitation audit records.

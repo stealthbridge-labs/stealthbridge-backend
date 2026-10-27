@@ -3,7 +3,7 @@
 use crate::{server::AppState, wallet};
 use axum::{
     body::Bytes,
-    extract::State,
+    extract::{RawQuery, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -151,9 +151,17 @@ fn record(row: &sqlx::postgres::PgRow, peer: &str) -> Result<InviteRecord, Invit
         expires_at_unix: expires,
     })
 }
-async fn list(pool: &PgPool, account: &str) -> Result<InviteDirectory, InviteError> {
-    let received = sqlx::query(
-        r#"SELECT i.id,i.organization_id,o.display_name,i.invited_by,
+async fn list(
+    pool: &PgPool,
+    account: &str,
+    organization: Option<Uuid>,
+) -> Result<InviteDirectory, InviteError> {
+    // Organization-scoped reads do not expose the caller's unrelated incoming invitations.
+    let received = if organization.is_some() {
+        Vec::new()
+    } else {
+        sqlx::query(
+            r#"SELECT i.id,i.organization_id,o.display_name,i.invited_by,
     EXTRACT(EPOCH FROM i.created_at)::bigint created_at_unix,
     EXTRACT(EPOCH FROM i.expires_at)::bigint expires_at_unix,
     'pending'::text invite_status
@@ -164,10 +172,11 @@ async fn list(pool: &PgPool, account: &str) -> Result<InviteDirectory, InviteErr
    WHERE i.invited_account=$1 AND i.accepted_at IS NULL AND i.revoked_at IS NULL
     AND i.expires_at>now() AND o.status='active'
    ORDER BY i.created_at DESC,i.id DESC LIMIT 21"#,
-    )
-    .bind(account)
-    .fetch_all(pool)
-    .await?;
+        )
+        .bind(account)
+        .fetch_all(pool)
+        .await?
+    };
     let sent = sqlx::query(
         r#"SELECT i.id,i.organization_id,o.display_name,i.invited_account,
     EXTRACT(EPOCH FROM i.created_at)::bigint created_at_unix,
@@ -181,9 +190,11 @@ async fn list(pool: &PgPool, account: &str) -> Result<InviteDirectory, InviteErr
    JOIN organization_members m ON m.organization_id=o.id
    WHERE m.subject=$1 AND m.role IN ('owner','admin')
     AND m.revoked_at IS NULL AND o.status='active'
+    AND ($2::uuid IS NULL OR i.organization_id=$2)
    ORDER BY i.created_at DESC,i.id DESC LIMIT 21"#,
     )
     .bind(account)
+    .bind(organization)
     .fetch_all(pool)
     .await?;
     let received_more = received.len() > PAGE;
@@ -439,17 +450,39 @@ fn error_response(error: InviteError) -> Response {
         }
     }
 }
-pub async fn get_invites(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+// Exact canonical query encoding ensures organization-scoped responses are bound to
+// the proxy's HMAC request-id field. Unknown/duplicate keys are rejected.
+fn parse_scope(query: Option<&str>) -> Result<Option<Uuid>, InviteError> {
+    let Some(query) = query else { return Ok(None) };
+    let raw = query
+        .strip_prefix("organization_id=")
+        .ok_or(InviteError::Invalid)?;
+    let org = Uuid::parse_str(raw).map_err(|_| InviteError::Invalid)?;
+    if org.is_nil() || org.to_string() != raw {
+        return Err(InviteError::Invalid);
+    }
+    Ok(Some(org))
+}
+pub async fn get_invites(
+    State(state): State<Arc<AppState>>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
     if !state.team_invites_enabled {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
-    let Some(account) = verify(&headers, secret(&state), "GET", "", "", now_unix()) else {
+    let organization = match parse_scope(query.as_deref()) {
+        Ok(value) => value,
+        Err(error) => return error_response(error),
+    };
+    let scope = organization.map(|id| id.to_string()).unwrap_or_default();
+    let Some(account) = verify(&headers, secret(&state), "GET", &scope, "", now_unix()) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
     let Some(db) = state.db.as_ref() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    match tokio::time::timeout(Duration::from_secs(5), list(db, &account)).await {
+    match tokio::time::timeout(Duration::from_secs(5), list(db, &account, organization)).await {
         Ok(Ok(rows)) => (
             [(
                 header::CACHE_CONTROL,
@@ -542,6 +575,21 @@ mod tests {
         assert!(verify(&headers, Some(secret), "POST", &nonce, &digest, ts + 31).is_none());
     }
     #[test]
+    fn canonical_query_scope_is_narrow_and_unambiguous() {
+        let id = Uuid::parse_str("9a1a395f-249c-4907-b657-d48df4b38d28").unwrap();
+        assert_eq!(parse_scope(None).unwrap(), None);
+        assert_eq!(
+            parse_scope(Some("organization_id=9a1a395f-249c-4907-b657-d48df4b38d28")).unwrap(),
+            Some(id)
+        );
+        for invalid in ["", "organization_id=", "organization_id=00000000-0000-0000-0000-000000000000",
+            "organization_id=9A1A395F-249C-4907-B657-D48DF4B38D28",
+            "organization_id=9a1a395f-249c-4907-b657-d48df4b38d28&organization_id=9a1a395f-249c-4907-b657-d48df4b38d28",
+            "other=9a1a395f-249c-4907-b657-d48df4b38d28"] {
+            assert!(parse_scope(Some(invalid)).is_err(), "{invalid}");
+        }
+    }
+    #[test]
     fn strict_invite_payload_disallows_admin_and_unknown_fields() {
         assert!(serde_json::from_str::<InviteAction>(
    r#"{"action":"create","organization_id":"9a1a395f-249c-4907-b657-d48df4b38d28","invited_account":"GC3YRVLB7IN7SNUYVWFUC6OD3QWJXCUZ4HOBNIPVGY7BZDVOYMDNX5TN","role":"viewer"}"#).is_ok());
@@ -618,17 +666,27 @@ mod postgres_tests {
             apply(&db, OWNER, Uuid::new_v4(), action()).await,
             Err(InviteError::Conflict)
         ));
-        let owner_list = list(&db, OWNER).await.unwrap();
+        let owner_list = list(&db, OWNER, None).await.unwrap();
+        let scoped = list(&db, OWNER, Some(org)).await.unwrap();
+        assert!(scoped.received.is_empty());
+        assert!(!scoped.received_more);
+        assert_eq!(scoped.sent.len(), 1);
+        assert_eq!(scoped.sent[0].id, invite);
+        assert!(list(&db, OWNER, Some(Uuid::new_v4()))
+            .await
+            .unwrap()
+            .sent
+            .is_empty());
         assert!(owner_list
             .sent
             .iter()
             .any(|item| item.id == invite && item.status == "pending"));
-        let target_list = list(&db, TARGET).await.unwrap();
+        let target_list = list(&db, TARGET, None).await.unwrap();
         assert!(target_list
             .received
             .iter()
             .any(|item| item.id == invite && item.role == "viewer"));
-        assert!(list(&db, OUTSIDER).await.unwrap().received.is_empty());
+        assert!(list(&db, OUTSIDER, None).await.unwrap().received.is_empty());
         assert!(matches!(
             apply(
                 &db,
@@ -672,13 +730,13 @@ mod postgres_tests {
         .await
         .unwrap();
         assert_eq!(role, "viewer");
-        assert!(!list(&db, TARGET)
+        assert!(!list(&db, TARGET, None)
             .await
             .unwrap()
             .received
             .iter()
             .any(|item| item.id == invite));
-        assert!(list(&db, OWNER)
+        assert!(list(&db, OWNER, None)
             .await
             .unwrap()
             .sent
@@ -810,7 +868,7 @@ mod postgres_tests {
         .execute(&db)
         .await
         .unwrap();
-        assert!(list(&db, TARGET).await.unwrap().received.is_empty());
+        assert!(list(&db, TARGET, None).await.unwrap().received.is_empty());
         assert!(matches!(
             apply(
                 &db,
