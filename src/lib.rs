@@ -12,6 +12,7 @@ pub mod org_auth;
 pub mod account_directory;
 pub mod business_onboarding;
 pub mod organization_team;
+pub mod team_invites;
 pub mod account_profile;
 pub mod ledger_events;
 pub mod platform;

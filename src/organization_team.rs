@@ -254,20 +254,27 @@ pub async fn get_organization_team(
     )
     .await
     {
-        Ok(Ok(team)) => (
-            [
-                (
-                    header::CACHE_CONTROL,
-                    HeaderValue::from_static("private, no-store"),
-                ),
-                (
-                    header::X_CONTENT_TYPE_OPTIONS,
-                    HeaderValue::from_static("nosniff"),
-                ),
-            ],
-            Json(team),
-        )
-            .into_response(),
+        Ok(Ok(mut team)) => {
+            // A viewer-only invitation is possible after both activation and
+            // the reviewed SQLx release flag; this is not payment authority.
+            team.invitation_issuance_enabled = state.team_invites_enabled
+                && team.organization.status == "active"
+                && matches!(team.organization.your_role.as_str(), "owner" | "admin");
+            (
+                [
+                    (
+                        header::CACHE_CONTROL,
+                        HeaderValue::from_static("private, no-store"),
+                    ),
+                    (
+                        header::X_CONTENT_TYPE_OPTIONS,
+                        HeaderValue::from_static("nosniff"),
+                    ),
+                ],
+                Json(team),
+            )
+                .into_response()
+        }
         Ok(Err(TeamError::NotFound)) => StatusCode::NOT_FOUND.into_response(),
         Ok(Err(TeamError::Forbidden)) => StatusCode::FORBIDDEN.into_response(),
         Ok(Err(TeamError::InvalidRecord)) => StatusCode::SERVICE_UNAVAILABLE.into_response(),

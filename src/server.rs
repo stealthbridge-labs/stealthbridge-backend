@@ -145,6 +145,7 @@ pub struct AppState {
     session_domain:Option<String>,
     session_secret:Option<Arc<Vec<u8>>>,
     pub(crate) account_bridge_secret:Option<Arc<Vec<u8>>>,
+    pub(crate) team_invites_enabled:bool,
     metrics:Arc<ReadinessMetrics>,
 }
 
@@ -212,6 +213,7 @@ impl AppState {
             rpc_rate_limit:Arc::new(Mutex::new(PublicReadLimiter::new(configured_read_limit()?))),
             metrics_token,session_domain,session_secret:session_secret.map(|s|Arc::new(s.into_bytes())),
             account_bridge_secret:account_bridge_secret.map(|s|Arc::new(s.into_bytes())),
+            team_invites_enabled:env::var("STEALTHBRIDGE_TEAM_INVITES_ENABLED").ok().as_deref()==Some("true"),
             metrics:Arc::new(ReadinessMetrics::default())})
     }
 
@@ -225,6 +227,7 @@ impl AppState {
             rpc_rate_limit: Arc::new(Mutex::new(PublicReadLimiter::new(DEFAULT_RPC_READS_PER_MINUTE))),
             metrics_token:None,
             session_domain:None, session_secret:None, account_bridge_secret:None,
+            team_invites_enabled:false,
             metrics:Arc::new(ReadinessMetrics::default()),
         }
     }
@@ -927,16 +930,18 @@ pub async fn run_ledger_observer(state:AppState) {
 /// The expected schema is deliberately versioned alongside the seven
 /// operator-run SQLx migrations. A successful TCP/SELECT 1 alone is not
 /// sufficient: the runtime must have its catalog and internal safeguards.
-const REQUIRED_SCHEMA_VERSIONS: [i64; 11] = [
+const REQUIRED_SCHEMA_VERSIONS: [i64; 12] = [
     202610080001, 202610080002, 202610080003, 202610080004,
     202610080005, 202610080006, 202610100001,
     202610130001, 202610130002, 202610150001, 202610210001,
+    202610270001,
 ];
 
 async fn database_schema_ready(pool: &PgPool) -> bool {
     // No implicit migrations, modifications, or sensitive table reads.
     // SQLx success flags and essential relations are checked in one SELECT.
-    const QUERY: &str = "SELECT COUNT(*) = 11 \
+    const QUERY: &str = "SELECT COUNT(*) = 12 \
+         AND to_regclass('organization_invitations') IS NOT NULL \
          AND to_regclass('customer_profiles') IS NOT NULL \
          AND to_regclass('customer_profile_update_receipts') IS NOT NULL \
          AND to_regclass('business_review_requests') IS NOT NULL \
@@ -1173,6 +1178,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/account/directory",get(crate::account_directory::account_directory))
         .route("/v1/account/organizations/{id}/team",
             get(crate::organization_team::get_organization_team))
+        .route("/v1/account/team-invites",
+            get(crate::team_invites::get_invites)
+             .post(crate::team_invites::post_invites)
+             .layer(axum::extract::DefaultBodyLimit::max(400)))
         .route("/v1/account/business-onboarding",
           get(crate::business_onboarding::list_business_applications)
           .post(crate::business_onboarding::create_business_application)
@@ -1271,13 +1280,13 @@ mod tests {
         let missing=observer_schema_projection(true,Some(7),false);
         assert_eq!(missing.schema_status,"migrations-pending");
         assert_eq!(missing.registered_migrations,Some(7));
-        assert_eq!(missing.required_migrations,11);
+        assert_eq!(missing.required_migrations,12);
         assert!(!missing.payment_execution_enabled);
         assert!(!missing.fee_collection_enabled);
         assert_eq!(observer_schema_projection(false,None,false).schema_status,"not-configured");
         assert_eq!(observer_schema_projection(true,None,false).schema_status,"unavailable");
-        assert_eq!(observer_schema_projection(true,Some(11),false).schema_status,"schema-incomplete");
-        assert_eq!(observer_schema_projection(true,Some(11),true).schema_status,"current");
+        assert_eq!(observer_schema_projection(true,Some(12),false).schema_status,"schema-incomplete");
+        assert_eq!(observer_schema_projection(true,Some(12),true).schema_status,"current");
     }
     #[tokio::test]
     async fn signed_tenant_review_reads_hide_identity_and_respect_revocation() {

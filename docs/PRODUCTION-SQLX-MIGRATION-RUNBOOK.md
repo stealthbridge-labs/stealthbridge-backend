@@ -52,3 +52,22 @@ and the profile change in a single transaction; replay cannot rewrite a
 profile. Sensitive production and preview secrets are already separate.
 Approval and retention policies for update receipts remain required before
 broad customer onboarding.
+
+## Added consent-based team invitations (27 October 2026)
+
+New source `202610270001_organization_invitations.sql` is a fifth pending
+migration beyond the seven previously applied to the production primary.
+The readiness manifest now expects **12 total** migration versions. Existing
+historical sections above describe the older requirements, not a claim that
+those migrations have been applied.
+
+This is an additive invitation-audit table with single-use viewer-only
+acceptance, expiry, revocation, and organization foreign-key restrictions.
+Its presence **does not activate invitations**: `STEALTHBRIDGE_TEAM_INVITES_ENABLED`
+must remain unset in both Vercel projects until approved SQLx migration,
+staging verification and supervised real Freighter two-account acceptance.
+
+Review SQLx checksums and confirm protected staging and production approval
+using the workflow above; do not execute DDL directly or enable invite
+controls while production remains on seven migrations. A safe rollout
+includes a tested disable/recovery plan and retains invitation audit rows.
