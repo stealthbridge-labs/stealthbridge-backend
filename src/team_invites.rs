@@ -358,7 +358,7 @@ async fn apply(
                 return Err(InviteError::Denied);
             }
             let valid: bool = sqlx::query_scalar(
-                "SELECT expires_at>now() FROM organization_invitations WHERE id=$1",
+                "SELECT expires_at>clock_timestamp() FROM organization_invitations WHERE id=$1",
             )
             .bind(invitation_id)
             .fetch_one(&mut *tx)
@@ -389,8 +389,8 @@ async fn apply(
                 return Err(InviteError::Conflict);
             }
             let updated = sqlx::query(
-                "UPDATE organization_invitations SET accepted_at=now()
-     WHERE id=$1 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>now()",
+                "UPDATE organization_invitations SET accepted_at=clock_timestamp()
+     WHERE id=$1 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>clock_timestamp()",
             )
             .bind(invitation_id)
             .execute(&mut *tx)
