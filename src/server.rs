@@ -83,7 +83,7 @@ async fn limit_public_rpc_reads(
     next:Next,
 )->Response {
     let path=request.uri().path();
-    let costly=path=="/v1/governance/snapshot" || path=="/v1/governance/admin" || path=="/v1/governance/code" || path=="/v1/governance/release" || path=="/v1/network" || path.starts_with("/v1/wallet/contracts/") || path.starts_with("/v1/transactions/") || path.starts_with("/v1/business/reviews/");
+    let costly=path=="/v1/diagnostics" || path=="/v1/governance/snapshot" || path=="/v1/governance/admin" || path=="/v1/governance/code" || path=="/v1/governance/release" || path=="/v1/network" || path.starts_with("/v1/wallet/contracts/") || path.starts_with("/v1/transactions/") || path.starts_with("/v1/business/reviews/");
     if !costly || request.method()!=axum::http::Method::GET {
         return next.run(request).await;
     }
@@ -373,6 +373,7 @@ fn public_api_directory() -> Value {
         "routes":{
             "process_health":"/health",
             "dependency_readiness":"/ready",
+            "dependency_diagnostics":"/v1/diagnostics",
             "network":"/v1/network",
             "capabilities":"/v1/capabilities",
             "corridors":"/v1/corridors/page?limit=25",
@@ -967,6 +968,72 @@ async fn database_schema_ready(pool: &PgPool) -> bool {
     .await
     .is_ok_and(|result| result.unwrap_or(false))
 }
+/// Public, non-custodial live preflight. Unlike /ready, this distinguishes
+/// broken database transport from missing/unapplied SQLx schema without
+/// exposing connection strings, relation names, or internal SQL errors.
+#[derive(Serialize)]
+struct DependencyDiagnostic {
+    schema_version: u8,
+    network: &'static str,
+    source: &'static str,
+    observed_at_unix: u64,
+    rpc: &'static str,
+    database: &'static str,
+    read_only_ready: bool,
+    payment_execution_enabled: bool,
+    privacy_verified: bool,
+    fiat_payouts_enabled: bool,
+}
+fn dependency_diagnostic(rpc: bool, db: &'static str, now: u64) -> DependencyDiagnostic {
+    DependencyDiagnostic {
+        schema_version: 1,
+        network: "testnet",
+        source: "live-backend-probes",
+        observed_at_unix: now,
+        rpc: if rpc { "connected" } else { "unavailable" },
+        database: db,
+        read_only_ready: rpc && db == "ready",
+        payment_execution_enabled: false,
+        privacy_verified: false,
+        fiat_payouts_enabled: false,
+    }
+}
+async fn diagnostic_database(pool: Option<&PgPool>) -> &'static str {
+    let Some(pool) = pool else {
+        return "not-configured";
+    };
+    let connected = tokio::time::timeout(
+        Duration::from_secs(2),
+        sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(pool),
+    )
+    .await;
+    if !matches!(connected, Ok(Ok(1))) {
+        return "unreachable";
+    }
+    if database_schema_ready(pool).await {
+        "ready"
+    } else {
+        "schema-incomplete"
+    }
+}
+async fn dependency_diagnostics(
+    State(state): State<Arc<AppState>>,
+) -> (
+    [(header::HeaderName, HeaderValue); 1],
+    Json<DependencyDiagnostic>,
+) {
+    let (network, db) = tokio::join!(state.network(), diagnostic_database(state.db.as_ref()));
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_secs())
+        .unwrap_or(0);
+    let rpc = network.is_ok_and(|head| ledger_is_fresh(&head.ledger_closed_at_unix, now, 180));
+    (
+        [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
+        Json(dependency_diagnostic(rpc, db, now)),
+    )
+}
+
 /// Ledger heads are freshness-bound independently of RPC HTTP liveness.
 /// A small future-clock allowance tolerates upstream timestamp/clock skew.
 fn ledger_is_fresh(closed_at_unix:&str, now:u64, max_age_secs:u64)->bool {
@@ -1173,6 +1240,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1",get(api_directory))
         .route("/health",get(health))
         .route("/ready",get(readiness))
+        .route("/v1/diagnostics",get(dependency_diagnostics))
         .route("/internal/metrics",get(internal_metrics))
         .route("/v1/network",get(network))
         .route("/v1/account/directory",get(crate::account_directory::account_directory))
@@ -1216,6 +1284,17 @@ pub fn router(state: AppState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn public_dependency_diagnostics_never_claim_execution_or_hide_degradation(){
+        for state in ["ready","schema-incomplete","unreachable","not-configured"] {
+            let observed=dependency_diagnostic(true,state,1800000000);
+            assert_eq!(observed.read_only_ready,state=="ready");
+            assert!(!observed.payment_execution_enabled);
+            assert!(!observed.privacy_verified);
+            assert!(!observed.fiat_payouts_enabled);
+        }
+        assert!(!dependency_diagnostic(false,"ready",1800000000).read_only_ready);
+    }
     #[tokio::test]
     async fn public_contract_inspection_is_get_only_uncacheable_and_strkey_validated(){
         use tower::ServiceExt;

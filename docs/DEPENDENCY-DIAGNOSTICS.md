@@ -1,0 +1,9 @@
+# Live Testnet dependency diagnostics (non-financial)
+
+`GET /v1/diagnostics` is a public, no-store, rate-limited **read-only** operational preflight. It performs bounded live RPC and PostgreSQL checks and always returns HTTP 200 with a strictly defined state payload (even when dependencies are degraded). `/health` remains process liveness; `/ready` remains HTTP 503 on degraded dependencies. Do not use diagnostic HTTP 200 as a load balancer readiness probe.
+
+`rpc` is `connected` only for a fresh Stellar Testnet ledger. `database` is one of `not-configured` (no URL), `unreachable` (bounded SELECT 1 did not succeed), `schema-incomplete` (connected but the existing SQLx migration/critical-table integrity check failed, including access errors) or `ready` (both passed). No migration is executed by this endpoint. Never expose SQL, credential strings, hostnames, tenant data or individual table names in the response. The general `/ready` field `database=unavailable` intentionally remains backwards-compatible.
+
+The response includes `schema_version=1`, `network=testnet`, `source=live-backend-probes`, `observed_at_unix`, and `read_only_ready` (true iff fresh RPC and full database schema checks succeed). `payment_execution_enabled`, `privacy_verified`, and `fiat_payouts_enabled` are **always false**. These are not KYC, contractual authorizations, custody checks, verified issuer integrations, or proof verification. Consumers must reject future/stale, contradictory, extended or non-Testnet payloads.
+
+A `schema-incomplete` result requires checking protected migration history and database permissions with an approved operator. **Do not run SQLx migrations automatically from application startup, GET handlers, or an unprotected production terminal.** Verify migration checksums and isolated staging first. Testnet-only invitations and business features remain gated. A `ready` diagnostic still cannot justify enabling settlements.
