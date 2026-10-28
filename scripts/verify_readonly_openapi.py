@@ -15,6 +15,7 @@ ALLOWED = {"/health", "/ready", "/internal/metrics", "/v1/observer",
            "/v1/network", "/v1/wallet/contracts/{address}", "/v1/governance/snapshot", "/v1/contracts", "/v1/capabilities", "/v1/platform/modules",
            "/v1/business/reviews/{organization}/{request_id}",
            "/v1/corridors", "/v1/corridors/page", "/v1/corridors/{id}",
+           "/v1/corridors/{id}/preflight",
            "/v1/transactions/{hash}", "/v1/settlements"}
 
 
@@ -60,6 +61,13 @@ def verify(text: str) -> int:
             raise ValueError(f"missing validated page filter {field}")
     if paths_text.count('pattern: "^[A-Z]{2}$"') != 2:
         raise ValueError("country filter patterns must be exact")
+    preflight=paths_text.split("  /v1/corridors/{id}/preflight:\n",1)[1].split("\n  /v1/",1)[0]
+    if "operationId: corridorMetadataPreflight" not in preflight or "CorridorPreflight" not in preflight:
+        raise ValueError("missing reviewed, non-execution corridor preflight")
+    for name in ("payment_execution_enabled","fee_quote_available","liquidity_verified",
+                 "issuer_verified","privacy_verified","fiat_payouts_enabled"):
+        if f"        {name}: {{type: boolean, const: false}}" not in schemas:
+            raise ValueError("corridor preflight is missing hardcoded no-execution flag: "+name)
     return len(routes)
 
 

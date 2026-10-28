@@ -262,6 +262,24 @@ paths:
         "400": {$ref: "#/components/responses/ApiError"}
         "404": {$ref: "#/components/responses/ApiError"}
         "503": {$ref: "#/components/responses/ApiError"}
+  /v1/corridors/{id}/preflight:
+    get:
+      operationId: corridorMetadataPreflight
+      summary: GET-only live Testnet and schema preflight for one enabled corridor (never a payment quote)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        "200":
+          description: Route metadata, current RPC/schema dependency state, all financial flags false
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/CorridorPreflight"}
+        "400": {$ref: "#/components/responses/ApiError"}
+        "404": {$ref: "#/components/responses/ApiError"}
+        "503": {$ref: "#/components/responses/ApiError"}
   /v1/transactions/{hash}:
     get:
       operationId: transactionObservation
@@ -428,6 +446,26 @@ components:
           maxItems: 100
           items: {$ref: "#/components/schemas/Corridor"}
         next_cursor: {type: [string, "null"], format: uuid}
+    CorridorPreflight:
+      type: object
+      additionalProperties: false
+      required: [schema_version, network, source, observed_at_unix, corridor, network_fresh, ledger_sequence, database_schema_ready, read_only_dependencies_ready, payment_execution_enabled, fee_quote_available, liquidity_verified, issuer_verified, privacy_verified, fiat_payouts_enabled]
+      properties:
+        schema_version: {type: integer, const: 1}
+        network: {type: string, const: testnet}
+        source: {type: string, const: live-corridor-metadata-preflight}
+        observed_at_unix: {type: integer, minimum: 1}
+        corridor: {$ref: "#/components/schemas/Corridor"}
+        network_fresh: {type: boolean}
+        ledger_sequence: {type: [integer, "null"], minimum: 1}
+        database_schema_ready: {type: boolean}
+        read_only_dependencies_ready: {type: boolean}
+        payment_execution_enabled: {type: boolean, const: false}
+        fee_quote_available: {type: boolean, const: false}
+        liquidity_verified: {type: boolean, const: false}
+        issuer_verified: {type: boolean, const: false}
+        privacy_verified: {type: boolean, const: false}
+        fiat_payouts_enabled: {type: boolean, const: false}
     TransactionObservation:
       type: object
       required: [hash, status, ledger, closed_at_unix, latest_ledger, source]

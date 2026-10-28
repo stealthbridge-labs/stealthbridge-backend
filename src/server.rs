@@ -377,6 +377,7 @@ fn public_api_directory() -> Value {
             "network":"/v1/network",
             "capabilities":"/v1/capabilities",
             "corridors":"/v1/corridors/page?limit=25",
+            "corridor_preflight":"/v1/corridors/{id}/preflight",
             "platform_modules":"/v1/platform/modules",
             "governance_release":"/v1/governance/release",
             "api_directory":"/v1"
@@ -658,6 +659,67 @@ async fn corridor_by_id(
             if row.safe_public_record() { Ok(Json(row)) }
             else { Err(StatusCode::SERVICE_UNAVAILABLE) }
         })
+}
+
+/// An operator-configured corridor is catalog metadata, never a payable quote.
+#[derive(Serialize)]
+struct CorridorPreflight {
+    schema_version: u8,
+    network: &'static str,
+    source: &'static str,
+    observed_at_unix: u64,
+    corridor: Corridor,
+    network_fresh: bool,
+    ledger_sequence: Option<u64>,
+    database_schema_ready: bool,
+    read_only_dependencies_ready: bool,
+    payment_execution_enabled: bool,
+    fee_quote_available: bool,
+    liquidity_verified: bool,
+    issuer_verified: bool,
+    privacy_verified: bool,
+    fiat_payouts_enabled: bool,
+}
+fn build_corridor_preflight(
+    corridor: Corridor, network_fresh: bool, ledger_sequence: Option<u64>,
+    schema_ready: bool, now: u64,
+) -> CorridorPreflight {
+    CorridorPreflight {
+        schema_version: 1, network: "testnet",
+        source: "live-corridor-metadata-preflight", observed_at_unix: now,
+        corridor, network_fresh,
+        ledger_sequence: if network_fresh { ledger_sequence } else { None },
+        database_schema_ready: schema_ready,
+        read_only_dependencies_ready: network_fresh && schema_ready,
+        payment_execution_enabled: false, fee_quote_available: false,
+        liquidity_verified: false, issuer_verified: false,
+        privacy_verified: false, fiat_payouts_enabled: false,
+    }
+}
+/// GET-only, corridor-scoped live review metadata. Neither recipient, amount,
+/// account, FX nor payment intent is ever sent to this endpoint.
+async fn corridor_preflight(
+    Path(id): Path<String>, State(state): State<Arc<AppState>>,
+) -> Result<([(header::HeaderName, HeaderValue); 1], Json<CorridorPreflight>), StatusCode> {
+    let id = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let pool = state.db.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let corridor = sqlx::query_as::<_, Corridor>(
+        "SELECT id, origin_country, destination_country, asset_code, asset_issuer, privacy_rail FROM corridors WHERE enabled=TRUE AND id=$1"
+    ).bind(id).fetch_optional(pool).await
+     .map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?
+     .ok_or(StatusCode::NOT_FOUND)?;
+    if !corridor.safe_public_record() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let (ledger, schema_ready) = tokio::join!(state.network(), database_schema_ready(pool));
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?.as_secs();
+    let fresh = ledger.as_ref().is_ok_and(|head|
+        ledger_is_fresh(&head.ledger_closed_at_unix, now, 180)
+    );
+    let ledger_sequence = ledger.ok().map(|head| head.ledger_sequence);
+    Ok(([(header::CACHE_CONTROL,HeaderValue::from_static("no-store"))],
+        Json(build_corridor_preflight(corridor, fresh, ledger_sequence, schema_ready, now))))
 }
 
 #[derive(Serialize)]
@@ -1274,6 +1336,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/corridors",get(corridors))
         .route("/v1/corridors/page",get(corridor_page))
         .route("/v1/corridors/{id}",get(corridor_by_id))
+        .route("/v1/corridors/{id}/preflight",get(corridor_preflight))
         .route("/v1/transactions/{hash}",get(public_transaction))
         .route("/v1/settlements",post(disabled))
         .layer(from_fn_with_state(Arc::clone(&state),limit_public_rpc_reads))
@@ -1284,6 +1347,30 @@ pub fn router(state: AppState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn corridor_preflight_is_read_only_even_with_healthy_dependencies() {
+        let corridor = || Corridor {
+            id: Uuid::new_v4(),
+            origin_country: "NG".to_string(),
+            destination_country: "GB".to_string(),
+            asset_code: "USDC".to_string(),
+            asset_issuer: None,
+            privacy_rail: "private-payments".to_string(),
+        };
+        let ready = build_corridor_preflight(corridor(), true, Some(12345), true, 1793200000);
+        let value = serde_json::to_value(&ready).unwrap();
+        assert_eq!(value["read_only_dependencies_ready"], true);
+        assert_eq!(value["ledger_sequence"], 12345);
+        for key in ["payment_execution_enabled","fee_quote_available",
+            "liquidity_verified","issuer_verified","privacy_verified","fiat_payouts_enabled"] {
+            assert_eq!(value[key], false, "{key} must fail closed");
+        }
+        let degraded = build_corridor_preflight(corridor(), false, Some(12345), true, 1793200000);
+        assert!(!degraded.read_only_dependencies_ready);
+        assert_eq!(degraded.ledger_sequence, None);
+        let missing = build_corridor_preflight(corridor(), true, Some(12345), false, 1793200000);
+        assert!(!missing.read_only_dependencies_ready);
+    }
     #[test]
     fn public_dependency_diagnostics_never_claim_execution_or_hide_degradation(){
         for state in ["ready","schema-incomplete","unreachable","not-configured"] {
