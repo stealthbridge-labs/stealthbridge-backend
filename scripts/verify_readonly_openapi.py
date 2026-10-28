@@ -15,7 +15,7 @@ ALLOWED = {"/health", "/ready", "/internal/metrics", "/v1/observer",
            "/v1/network", "/v1/wallet/contracts/{address}", "/v1/governance/snapshot", "/v1/contracts", "/v1/capabilities", "/v1/platform/modules",
            "/v1/business/reviews/{organization}/{request_id}",
            "/v1/corridors", "/v1/corridors/page", "/v1/corridors/{id}",
-           "/v1/corridors/{id}/preflight",
+           "/v1/corridors/{id}/preflight", "/v1/corridors/batch",
            "/v1/transactions/{hash}", "/v1/settlements"}
 
 

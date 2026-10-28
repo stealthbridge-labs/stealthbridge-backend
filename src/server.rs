@@ -83,7 +83,7 @@ async fn limit_public_rpc_reads(
     next:Next,
 )->Response {
     let path=request.uri().path();
-    let costly=path=="/v1/diagnostics" || path=="/v1/governance/snapshot" || path=="/v1/governance/admin" || path=="/v1/governance/code" || path=="/v1/governance/release" || path=="/v1/network" || path.starts_with("/v1/wallet/contracts/") || path.starts_with("/v1/transactions/") || path.starts_with("/v1/business/reviews/");
+    let costly=path=="/v1/corridors/batch" || (path.starts_with("/v1/corridors/") && path.ends_with("/preflight")) || path=="/v1/diagnostics" || path=="/v1/governance/snapshot" || path=="/v1/governance/admin" || path=="/v1/governance/code" || path=="/v1/governance/release" || path=="/v1/network" || path.starts_with("/v1/wallet/contracts/") || path.starts_with("/v1/transactions/") || path.starts_with("/v1/business/reviews/");
     if !costly || request.method()!=axum::http::Method::GET {
         return next.run(request).await;
     }
@@ -332,7 +332,7 @@ struct Health {
     service: &'static str,
 }
 
-#[derive(Serialize, FromRow)]
+#[derive(Serialize, FromRow, Clone)]
 pub struct Corridor {
     id: Uuid,
     origin_country: String,
@@ -378,6 +378,7 @@ fn public_api_directory() -> Value {
             "capabilities":"/v1/capabilities",
             "corridors":"/v1/corridors/page?limit=25",
             "corridor_preflight":"/v1/corridors/{id}/preflight",
+            "corridor_batch":"/v1/corridors/batch?ids=<canonical_uuid_list>",
             "platform_modules":"/v1/platform/modules",
             "governance_release":"/v1/governance/release",
             "api_directory":"/v1"
@@ -659,6 +660,81 @@ async fn corridor_by_id(
             if row.safe_public_record() { Ok(Json(row)) }
             else { Err(StatusCode::SERVICE_UNAVAILABLE) }
         })
+}
+
+/// A small, explicit set of public route identifiers. No client amount,
+/// recipient, partner, identity or settlement command can enter this API.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CorridorBatchQuery {
+    ids: String,
+}
+fn parse_corridor_batch_ids(raw: &str) -> Result<Vec<Uuid>, StatusCode> {
+    if raw.is_empty() || raw.len() > 295 { return Err(StatusCode::BAD_REQUEST); }
+    let mut ids = Vec::new();
+    for segment in raw.split(',') {
+        if segment.len() != 36 { return Err(StatusCode::BAD_REQUEST); }
+        let id = Uuid::parse_str(segment).map_err(|_|StatusCode::BAD_REQUEST)?;
+        // Canonical lowercase spelling: no ambiguous encodings or repeated ids.
+        if id.to_string() != segment || ids.contains(&id) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        ids.push(id);
+        if ids.len() > 8 { return Err(StatusCode::BAD_REQUEST); }
+    }
+    Ok(ids)
+}
+#[derive(Serialize)]
+struct CorridorBatch {
+    schema_version: u8,
+    network: &'static str,
+    source: &'static str,
+    requested_ids: Vec<Uuid>,
+    items: Vec<Corridor>,
+    missing_ids: Vec<Uuid>,
+    all_configured: bool,
+    payment_execution_enabled: bool,
+    privacy_verified: bool,
+    fiat_payouts_enabled: bool,
+}
+fn corridor_batch_response(ids: Vec<Uuid>, rows: Vec<Corridor>) -> Result<CorridorBatch,StatusCode> {
+    if rows.len() > ids.len() || !rows.iter().all(Corridor::safe_public_record) {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let mut ordered = Vec::new();
+    let mut missing = Vec::new();
+    for id in &ids {
+        if let Some(row) = rows.iter().find(|row|row.id == *id) {
+            ordered.push(Corridor {
+                id:row.id,origin_country:row.origin_country.clone(),
+                destination_country:row.destination_country.clone(),
+                asset_code:row.asset_code.clone(),asset_issuer:row.asset_issuer.clone(),
+                privacy_rail:row.privacy_rail.clone()
+            });
+        } else { missing.push(*id); }
+    }
+    if ordered.len() != rows.len() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let complete = missing.is_empty();
+    Ok(CorridorBatch {
+        schema_version:1,network:"testnet",source:"operator-corridor-batch",
+        requested_ids:ids,items:ordered,missing_ids:missing,all_configured:complete,
+        payment_execution_enabled:false,privacy_verified:false,fiat_payouts_enabled:false,
+    })
+}
+/// One bounded read of enabled operator corridor IDs. A full catalog match
+/// conveys no authorization, liquidity, FX, issuer support or financial readiness.
+async fn corridor_batch(
+    State(state):State<Arc<AppState>>, Query(params):Query<CorridorBatchQuery>
+)->Result<([(header::HeaderName,HeaderValue);1],Json<CorridorBatch>),StatusCode>{
+    let ids = parse_corridor_batch_ids(&params.ids)?;
+    let pool = state.db.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let rows = sqlx::query_as::<_,Corridor>(
+        "SELECT id,origin_country,destination_country,asset_code,asset_issuer,privacy_rail          FROM corridors WHERE enabled=TRUE AND id = ANY($1::uuid[])"
+    ).bind(&ids).fetch_all(pool).await.map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?;
+    let result = corridor_batch_response(ids,rows)?;
+    Ok(([(header::CACHE_CONTROL,HeaderValue::from_static("no-store"))],Json(result)))
 }
 
 /// An operator-configured corridor is catalog metadata, never a payable quote.
@@ -1335,6 +1411,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/governance/snapshot",get(governance_snapshot))
         .route("/v1/corridors",get(corridors))
         .route("/v1/corridors/page",get(corridor_page))
+        .route("/v1/corridors/batch",get(corridor_batch))
         .route("/v1/corridors/{id}",get(corridor_by_id))
         .route("/v1/corridors/{id}/preflight",get(corridor_preflight))
         .route("/v1/transactions/{hash}",get(public_transaction))
@@ -1347,6 +1424,38 @@ pub fn router(state: AppState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn corridor_batch_validates_exact_bounded_identifiers_and_never_executes() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let raw = format!("{a},{b}");
+        let ids = parse_corridor_batch_ids(&raw).unwrap();
+        assert_eq!(ids,[a,b]);
+        for bad in ["","none","not-a-uuid","00000000-0000-0000-0000-000000000000?amount=9"] {
+            assert_eq!(parse_corridor_batch_ids(bad),Err(StatusCode::BAD_REQUEST));
+        }
+        assert_eq!(parse_corridor_batch_ids(&format!("{a},{a}")),Err(StatusCode::BAD_REQUEST));
+        assert_eq!(parse_corridor_batch_ids(&a.to_string().to_uppercase()),Err(StatusCode::BAD_REQUEST));
+        assert_eq!(parse_corridor_batch_ids(&format!("{a},{b},{}",a.to_string())),Err(StatusCode::BAD_REQUEST));
+        assert_eq!(parse_corridor_batch_ids(&vec![a.to_string();9].join(",")),Err(StatusCode::BAD_REQUEST));
+        let sample = Corridor {
+            id:b,origin_country:"NG".to_owned(),destination_country:"GH".to_owned(),
+            asset_code:"USDC".to_owned(),asset_issuer:None,
+            privacy_rail:"private-payments".to_owned()
+        };
+        let incomplete = corridor_batch_response(ids.clone(),vec![sample.clone()]).unwrap();
+        let v = serde_json::to_value(incomplete).unwrap();
+        assert_eq!(v["requested_ids"][0],a.to_string());
+        assert_eq!(v["items"][0]["id"],b.to_string());
+        assert_eq!(v["missing_ids"][0],a.to_string());
+        assert_eq!(v["all_configured"],false);
+        for field in ["payment_execution_enabled","privacy_verified","fiat_payouts_enabled"] {
+            assert_eq!(v[field],false);
+        }
+        let complete = corridor_batch_response(vec![b],vec![sample]).unwrap();
+        assert!(complete.all_configured);
+        assert!(!complete.payment_execution_enabled);
+    }
     #[test]
     fn corridor_preflight_is_read_only_even_with_healthy_dependencies() {
         let corridor = || Corridor {

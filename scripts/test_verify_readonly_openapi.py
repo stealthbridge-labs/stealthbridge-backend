@@ -10,7 +10,7 @@ class ReadOnlyApiSchemaTests(unittest.TestCase):
     def setUpClass(cls):
         cls.schema = PATH.read_text()
     def test_documented_routes_include_only_disabled_post(self):
-        self.assertEqual(verify(self.schema), 17)
+        self.assertEqual(verify(self.schema), 18)
     def test_duplicate_component_block_rejected(self):
         with self.assertRaisesRegex(ValueError, "exactly one"):
             verify(self.schema + "\ncomponents:\n  schemas:\n    Forged: {}\n")
