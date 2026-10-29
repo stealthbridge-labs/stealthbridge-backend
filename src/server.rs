@@ -83,7 +83,7 @@ async fn limit_public_rpc_reads(
     next:Next,
 )->Response {
     let path=request.uri().path();
-    let costly=path=="/v1/corridors/batch" || (path.starts_with("/v1/corridors/") && path.ends_with("/preflight")) || path=="/v1/diagnostics" || path=="/v1/governance/snapshot" || path=="/v1/governance/admin" || path=="/v1/governance/code" || path=="/v1/governance/release" || path=="/v1/network" || path.starts_with("/v1/wallet/contracts/") || path.starts_with("/v1/transactions/") || path.starts_with("/v1/business/reviews/");
+    let costly=(path=="/v1/corridors/batch" || path=="/v1/corridors/batch/preflight") || (path.starts_with("/v1/corridors/") && path.ends_with("/preflight")) || path=="/v1/diagnostics" || path=="/v1/governance/snapshot" || path=="/v1/governance/admin" || path=="/v1/governance/code" || path=="/v1/governance/release" || path=="/v1/network" || path.starts_with("/v1/wallet/contracts/") || path.starts_with("/v1/transactions/") || path.starts_with("/v1/business/reviews/");
     if !costly || request.method()!=axum::http::Method::GET {
         return next.run(request).await;
     }
@@ -379,6 +379,7 @@ fn public_api_directory() -> Value {
             "corridors":"/v1/corridors/page?limit=25",
             "corridor_preflight":"/v1/corridors/{id}/preflight",
             "corridor_batch":"/v1/corridors/batch?ids=<canonical_uuid_list>",
+            "batch_preflight":"/v1/corridors/batch/preflight?ids=<canonical_uuid_list>",
             "platform_modules":"/v1/platform/modules",
             "governance_release":"/v1/governance/release",
             "api_directory":"/v1"
@@ -735,6 +736,60 @@ async fn corridor_batch(
     ).bind(&ids).fetch_all(pool).await.map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?;
     let result = corridor_batch_response(ids,rows)?;
     Ok(([(header::CACHE_CONTROL,HeaderValue::from_static("no-store"))],Json(result)))
+}
+
+/// One consistent operator-corridor snapshot plus live dependency health.
+#[derive(Serialize)]
+struct CorridorBatchPreflight {
+    schema_version: u8,
+    network: &'static str,
+    source: &'static str,
+    observed_at_unix: u64,
+    batch: CorridorBatch,
+    network_fresh: bool,
+    ledger_sequence: Option<u64>,
+    database_schema_ready: bool,
+    read_only_dependencies_ready: bool,
+    payment_execution_enabled: bool,
+    fee_quote_available: bool,
+    liquidity_verified: bool,
+    issuer_verified: bool,
+    privacy_verified: bool,
+    fiat_payouts_enabled: bool,
+}
+fn build_batch_preflight(
+    batch: CorridorBatch, network_fresh: bool, ledger_sequence: Option<u64>,
+    schema_ready: bool, now: u64,
+) -> CorridorBatchPreflight {
+    CorridorBatchPreflight {
+        schema_version:1,network:"testnet",
+        source:"live-batch-metadata-preflight",observed_at_unix:now,
+        batch,network_fresh,ledger_sequence:if network_fresh {ledger_sequence} else {None},
+        database_schema_ready:schema_ready,
+        read_only_dependencies_ready:network_fresh && schema_ready,
+        payment_execution_enabled:false,fee_quote_available:false,
+        liquidity_verified:false,issuer_verified:false,privacy_verified:false,
+        fiat_payouts_enabled:false
+    }
+}
+/// GET-only. Payment fields never enter the API: only public UUIDs.
+async fn corridor_batch_preflight(
+    State(state):State<Arc<AppState>>,Query(params):Query<CorridorBatchQuery>,
+)->Result<([(header::HeaderName,HeaderValue);1],Json<CorridorBatchPreflight>),StatusCode>{
+    let ids=parse_corridor_batch_ids(&params.ids)?;
+    let pool=state.db.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let rows=sqlx::query_as::<_,Corridor>(
+        "SELECT id,origin_country,destination_country,asset_code,asset_issuer,privacy_rail FROM corridors WHERE enabled=TRUE AND id=ANY($1::uuid[])"
+    ).bind(&ids).fetch_all(pool).await.map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?;
+    let batch=corridor_batch_response(ids,rows)?;
+    let (head,schema_ready)=tokio::join!(state.network(),database_schema_ready(pool));
+    let now=SystemTime::now().duration_since(UNIX_EPOCH)
+       .map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?.as_secs();
+    let fresh=head.as_ref().is_ok_and(|value|
+       ledger_is_fresh(&value.ledger_closed_at_unix,now,180));
+    let seq=head.ok().map(|value|value.ledger_sequence);
+    Ok(([(header::CACHE_CONTROL,HeaderValue::from_static("no-store"))],
+        Json(build_batch_preflight(batch,fresh,seq,schema_ready,now))))
 }
 
 /// An operator-configured corridor is catalog metadata, never a payable quote.
@@ -1412,6 +1467,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/corridors",get(corridors))
         .route("/v1/corridors/page",get(corridor_page))
         .route("/v1/corridors/batch",get(corridor_batch))
+        .route("/v1/corridors/batch/preflight",get(corridor_batch_preflight))
         .route("/v1/corridors/{id}",get(corridor_by_id))
         .route("/v1/corridors/{id}/preflight",get(corridor_preflight))
         .route("/v1/transactions/{hash}",get(public_transaction))
@@ -1455,6 +1511,33 @@ mod tests {
         let complete = corridor_batch_response(vec![b],vec![sample]).unwrap();
         assert!(complete.all_configured);
         assert!(!complete.payment_execution_enabled);
+    }
+    #[test]
+    fn batch_preflight_evidence_can_never_enable_money(){
+        let id=Uuid::new_v4();
+        let row=Corridor {
+           id,origin_country:"NG".to_owned(),destination_country:"GH".to_owned(),
+           asset_code:"USDC".to_owned(),asset_issuer:None,
+           privacy_rail:"private-payments".to_owned()
+        };
+        let batch=corridor_batch_response(vec![id],vec![row]).unwrap();
+        let ready=build_batch_preflight(batch,true,Some(123_456),true,1793200000);
+        let evidence=serde_json::to_value(&ready).unwrap();
+        assert_eq!(evidence["read_only_dependencies_ready"],true);
+        assert_eq!(evidence["batch"]["all_configured"],true);
+        assert_eq!(evidence["ledger_sequence"],123_456);
+        for flag in ["payment_execution_enabled","fee_quote_available",
+                     "liquidity_verified","issuer_verified","privacy_verified","fiat_payouts_enabled"] {
+           assert_eq!(evidence[flag],false);
+        }
+        let missing=build_batch_preflight(corridor_batch_response(vec![id],vec![]).unwrap(),
+                                          false,Some(123_456),false,1793200000);
+        assert!(missing.ledger_sequence.is_none());
+        assert!(!missing.batch.all_configured);
+        assert!(!missing.read_only_dependencies_ready);
+        let degraded=build_batch_preflight(corridor_batch_response(vec![id],vec![]).unwrap(),
+                                          true,Some(123_456),false,1793200000);
+        assert!(!degraded.read_only_dependencies_ready);
     }
     #[test]
     fn corridor_preflight_is_read_only_even_with_healthy_dependencies() {

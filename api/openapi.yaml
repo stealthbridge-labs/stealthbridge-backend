@@ -244,6 +244,24 @@ paths:
               schema: {$ref: "#/components/schemas/CorridorPage"}
         "400": {$ref: "#/components/responses/ApiError"}
         "503": {$ref: "#/components/responses/ApiError"}
+  /v1/corridors/batch/preflight:
+    get:
+      operationId: corridorBatchPreflight
+      summary: Fresh live dependency observations for one to eight configured corridor IDs (read only)
+      parameters:
+        - name: ids
+          in: query
+          required: true
+          description: One to eight canonical lowercase UUIDs only; no financial or account data
+          schema: {type: string, maxLength: 295}
+      responses:
+        "200":
+          description: Complete, bounded public corridor snapshot and live Testnet/schema readiness; no financial authorization
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/CorridorBatchPreflight"}
+        "400": {$ref: "#/components/responses/ApiError"}
+        "503": {$ref: "#/components/responses/ApiError"}
   /v1/corridors/batch:
     get:
       operationId: corridorBatch
@@ -464,6 +482,26 @@ components:
           maxItems: 100
           items: {$ref: "#/components/schemas/Corridor"}
         next_cursor: {type: [string, "null"], format: uuid}
+    CorridorBatchPreflight:
+      type: object
+      additionalProperties: false
+      required: [schema_version, network, source, observed_at_unix, batch, network_fresh, ledger_sequence, database_schema_ready, read_only_dependencies_ready, payment_execution_enabled, fee_quote_available, liquidity_verified, issuer_verified, privacy_verified, fiat_payouts_enabled]
+      properties:
+        schema_version: {type: integer, const: 1}
+        network: {type: string, const: testnet}
+        source: {type: string, const: live-batch-metadata-preflight}
+        observed_at_unix: {type: integer, minimum: 1}
+        batch: {$ref: "#/components/schemas/CorridorBatch"}
+        network_fresh: {type: boolean}
+        ledger_sequence: {type: [integer, "null"], minimum: 1}
+        database_schema_ready: {type: boolean}
+        read_only_dependencies_ready: {type: boolean}
+        payment_execution_enabled: {type: boolean, const: false}
+        fee_quote_available: {type: boolean, const: false}
+        liquidity_verified: {type: boolean, const: false}
+        issuer_verified: {type: boolean, const: false}
+        privacy_verified: {type: boolean, const: false}
+        fiat_payouts_enabled: {type: boolean, const: false}
     CorridorBatch:
       type: object
       additionalProperties: false
