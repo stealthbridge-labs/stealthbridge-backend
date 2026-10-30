@@ -83,7 +83,7 @@ async fn limit_public_rpc_reads(
     next:Next,
 )->Response {
     let path=request.uri().path();
-    let costly=(path=="/v1/corridors/batch" || path=="/v1/corridors/batch/preflight") || (path.starts_with("/v1/corridors/") && path.ends_with("/preflight")) || path=="/v1/diagnostics" || path=="/v1/governance/snapshot" || path=="/v1/governance/admin" || path=="/v1/governance/code" || path=="/v1/governance/release" || path=="/v1/network" || path.starts_with("/v1/wallet/contracts/") || path.starts_with("/v1/transactions/") || path.starts_with("/v1/business/reviews/");
+    let costly=(path=="/v1/corridors/batch" || path=="/v1/corridors/batch/preflight") || (path.starts_with("/v1/corridors/") && path.ends_with("/preflight")) || path=="/v1/diagnostics" || path=="/v1/governance/snapshot" || path=="/v1/governance/admin" || path=="/v1/governance/code" || path=="/v1/governance/release" || path=="/v1/network" || (path.starts_with("/v1/wallet/contracts/") || path.starts_with("/v1/wallet/recipient/")) || path.starts_with("/v1/transactions/") || path.starts_with("/v1/business/reviews/");
     if !costly || request.method()!=axum::http::Method::GET {
         return next.run(request).await;
     }
@@ -934,6 +934,35 @@ async fn public_contract_instance(
  })))
 }
 
+/// Consent-initiated recipient lookup: client receives only whether a current
+/// contract instance exists, never its executable digest or administrator data.
+async fn public_recipient_presence(
+ State(state):State<Arc<AppState>>,Path(address):Path<String>,
+)->Result<([(header::HeaderName,HeaderValue);1],Json<Value>),StatusCode>{
+ // Reuse the independently checked network, key, ledger and TTL checks.
+ let Json(observed)=public_contract_instance(State(state),Path(address.clone())).await?;
+ let now=SystemTime::now().duration_since(UNIX_EPOCH)
+  .map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?.as_secs();
+ let current=observed["observed_ledger_sequence"].as_u64()
+  .ok_or(StatusCode::BAD_GATEWAY)?;
+ let found=observed["contract_instance_found"].as_bool()
+  .ok_or(StatusCode::BAD_GATEWAY)?;
+ Ok(([(header::CACHE_CONTROL,HeaderValue::from_static("no-store"))],
+ Json(json!({
+  "schema_version":1,"network":"testnet",
+  "source":"stellar-rpc/recipient-presence",
+  "address":address,
+  "observed_at_unix":now,
+  "observed_ledger_sequence":current,
+  "contract_instance_found":found,
+  "smart_account_verified":false,
+  "signer_authority_verified":false,
+  "recipient_asset_eligibility_verified":false,
+  "privacy_verified":false,
+  "payment_execution_enabled":false
+ }))))
+}
+
 async fn observer_activity(
  State(state):State<Arc<AppState>>,
  Query(options):Query<ledger_events::ActivityOptions>,
@@ -1329,7 +1358,7 @@ async fn diagnostic_responses(request:Request<Body>,next:Next)->Response{
     response.headers_mut().insert("x-robots-tag",HeaderValue::from_static("noindex, nofollow, noarchive"));
     // A contract instance is a time-sensitive public ledger observation, not
     // stable account identity. Never let intermediaries reuse stale presence.
-    if path.starts_with("/v1/wallet/contracts/") {
+    if path.starts_with("/v1/wallet/contracts/") || path.starts_with("/v1/wallet/recipient/") {
         response.headers_mut().insert(header::CACHE_CONTROL,HeaderValue::from_static("no-store"));
     }
     response
@@ -1456,6 +1485,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/observer/activity",get(observer_activity))
         .route("/v1/observer/schema",get(observer_schema))
         .route("/v1/wallet/contracts/{address}",get(public_contract_instance))
+        .route("/v1/wallet/recipient/{address}",get(public_recipient_presence))
         .route("/v1/capabilities",get(capabilities))
         .route("/v1/platform/modules",get(crate::platform::platform_modules))
         .route("/v1/business/reviews/{organization}/{request_id}",get(business_review_status))
@@ -1573,6 +1603,19 @@ mod tests {
             assert!(!observed.fiat_payouts_enabled);
         }
         assert!(!dependency_diagnostic(false,"ready",1800000000).read_only_ready);
+    }
+    #[tokio::test]
+    async fn recipient_presence_is_get_only_and_rejects_unknown_addresses(){
+        use tower::ServiceExt;
+        let app=router(AppState::without_db());
+        let uri="/v1/wallet/recipient/not-a-contract";
+        let wrong=app.clone().oneshot(Request::builder().uri(uri)
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(wrong.status(),StatusCode::BAD_REQUEST);
+        assert_eq!(wrong.headers()[header::CACHE_CONTROL],"no-store");
+        let blocked=app.oneshot(Request::builder().method("POST").uri(uri)
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(blocked.status(),StatusCode::METHOD_NOT_ALLOWED);
     }
     #[tokio::test]
     async fn public_contract_inspection_is_get_only_uncacheable_and_strkey_validated(){
