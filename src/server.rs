@@ -83,7 +83,7 @@ async fn limit_public_rpc_reads(
     next:Next,
 )->Response {
     let path=request.uri().path();
-    let costly=(path=="/v1/corridors/batch" || path=="/v1/corridors/batch/preflight") || (path.starts_with("/v1/corridors/") && path.ends_with("/preflight")) || path=="/v1/diagnostics" || path=="/v1/governance/snapshot" || path=="/v1/governance/admin" || path=="/v1/governance/code" || path=="/v1/governance/release" || path=="/v1/network" || (path.starts_with("/v1/wallet/contracts/") || path.starts_with("/v1/wallet/recipient/")) || path.starts_with("/v1/transactions/") || path.starts_with("/v1/business/reviews/");
+    let costly=(path=="/v1/corridors/batch" || path=="/v1/corridors/batch/preflight") || (path.starts_with("/v1/corridors/") && path.ends_with("/preflight")) || path=="/v1/diagnostics" || path=="/v1/governance/snapshot" || path=="/v1/governance/admin" || path=="/v1/governance/code" || path=="/v1/governance/release" || path=="/v1/network" || (path.starts_with("/v1/wallet/contracts/") || path.starts_with("/v1/wallet/recipient/") || path.starts_with("/v1/wallet/classic-recipient/")) || path.starts_with("/v1/transactions/") || path.starts_with("/v1/business/reviews/");
     if !costly || request.method()!=axum::http::Method::GET {
         return next.run(request).await;
     }
@@ -934,6 +934,53 @@ async fn public_contract_instance(
  })))
 }
 
+/// Customer-only public G-account presence. No balances or signer data returned.
+fn checked_horizon_account(payload:&Value,expected:&str)->Result<bool,()>{
+ if crate::wallet::decode_account_address(expected).is_none(){return Err(());}
+ if payload.get("id").and_then(Value::as_str)!=Some(expected){return Err(());}
+ if payload.get("account_id").and_then(Value::as_str)!=Some(expected){return Err(());}
+ Ok(true)
+}
+async fn public_classic_recipient_presence(
+ State(state):State<Arc<AppState>>,Path(address):Path<String>
+)->Result<([(header::HeaderName,HeaderValue);1],Json<Value>),StatusCode>{
+ if crate::wallet::decode_account_address(&address).is_none(){
+  return Err(StatusCode::BAD_REQUEST);
+ }
+ let head=state.network().await.map_err(|_|StatusCode::BAD_GATEWAY)?;
+ let now=SystemTime::now().duration_since(UNIX_EPOCH)
+  .map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?.as_secs();
+ if !ledger_is_fresh(&head.ledger_closed_at_unix,now,180){
+  return Err(StatusCode::SERVICE_UNAVAILABLE);
+ }
+ // Strictly pinned Testnet Horizon host. No caller-controlled host/path/query.
+ let url=format!("https://horizon-testnet.stellar.org/accounts/{address}");
+ let mut response=state.http.get(&url).header(header::ACCEPT,"application/json")
+  .send().await.map_err(|_|StatusCode::BAD_GATEWAY)?;
+ let found=if response.status()==StatusCode::NOT_FOUND{false}else{
+  if response.status()!=StatusCode::OK{return Err(StatusCode::BAD_GATEWAY);}
+  const MAX_HORIZON_ACCOUNT_BYTES:usize=65536;
+  if response.content_length().is_some_and(|len|len>MAX_HORIZON_ACCOUNT_BYTES as u64){
+   return Err(StatusCode::BAD_GATEWAY);
+  }
+  let mut bytes=Vec::new();
+  while let Some(chunk)=response.chunk().await.map_err(|_|StatusCode::BAD_GATEWAY)?{
+   if chunk.len()>MAX_HORIZON_ACCOUNT_BYTES.saturating_sub(bytes.len()){
+    return Err(StatusCode::BAD_GATEWAY);
+   }
+   bytes.extend_from_slice(&chunk);
+  }
+  let data:Value=serde_json::from_slice(&bytes).map_err(|_|StatusCode::BAD_GATEWAY)?;
+  checked_horizon_account(&data,&address).map_err(|_|StatusCode::BAD_GATEWAY)?
+ };
+ Ok(([(header::CACHE_CONTROL,HeaderValue::from_static("no-store"))],Json(json!({
+  "schema_version":1,"network":"testnet","source":"stellar-horizon/account-presence",
+  "address":address,"observed_at_unix":now,
+  "classic_account_found":found,"ownership_verified":false,
+  "asset_acceptance_verified":false,"payment_execution_enabled":false
+ }))))
+}
+
 /// Consent-initiated recipient lookup: client receives only whether a current
 /// contract instance exists, never its executable digest or administrator data.
 async fn public_recipient_presence(
@@ -1358,7 +1405,7 @@ async fn diagnostic_responses(request:Request<Body>,next:Next)->Response{
     response.headers_mut().insert("x-robots-tag",HeaderValue::from_static("noindex, nofollow, noarchive"));
     // A contract instance is a time-sensitive public ledger observation, not
     // stable account identity. Never let intermediaries reuse stale presence.
-    if path.starts_with("/v1/wallet/contracts/") || path.starts_with("/v1/wallet/recipient/") {
+    if path.starts_with("/v1/wallet/contracts/") || path.starts_with("/v1/wallet/recipient/") || path.starts_with("/v1/wallet/classic-recipient/") {
         response.headers_mut().insert(header::CACHE_CONTROL,HeaderValue::from_static("no-store"));
     }
     response
@@ -1486,6 +1533,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/observer/schema",get(observer_schema))
         .route("/v1/wallet/contracts/{address}",get(public_contract_instance))
         .route("/v1/wallet/recipient/{address}",get(public_recipient_presence))
+        .route("/v1/wallet/classic-recipient/{address}",get(public_classic_recipient_presence))
         .route("/v1/capabilities",get(capabilities))
         .route("/v1/platform/modules",get(crate::platform::platform_modules))
         .route("/v1/business/reviews/{organization}/{request_id}",get(business_review_status))
@@ -1603,6 +1651,29 @@ mod tests {
             assert!(!observed.fiat_payouts_enabled);
         }
         assert!(!dependency_diagnostic(false,"ready",1800000000).read_only_ready);
+    }
+    #[test]
+    fn classic_recipient_horizon_evidence_requires_matching_accounts(){
+      let key="GAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB7JZX";
+      assert_eq!(checked_horizon_account(&json!({"id":key,"account_id":key,"balances":[{"balance":"123"}]}),key),Ok(true));
+      for bad in [json!({"id":key}),json!({"id":key,"account_id":"GFAKE"}),
+        json!({"id":"GFAKE","account_id":key}),json!({})]{
+        assert!(checked_horizon_account(&bad,key).is_err());
+      }
+      assert!(checked_horizon_account(&json!({"id":key,"account_id":key}),"not-an-account").is_err());
+    }
+    #[tokio::test]
+    async fn classic_recipient_endpoint_is_get_only_and_cache_disabled(){
+      use tower::ServiceExt;
+      let app=router(AppState::without_db());
+      let uri="/v1/wallet/classic-recipient/invalid";
+      let wrong=app.clone().oneshot(Request::builder().uri(uri)
+        .body(Body::empty()).unwrap()).await.unwrap();
+      assert_eq!(wrong.status(),StatusCode::BAD_REQUEST);
+      assert_eq!(wrong.headers()[header::CACHE_CONTROL],"no-store");
+      let blocked=app.oneshot(Request::builder().method("POST").uri(uri)
+        .body(Body::empty()).unwrap()).await.unwrap();
+      assert_eq!(blocked.status(),StatusCode::METHOD_NOT_ALLOWED);
     }
     #[tokio::test]
     async fn recipient_presence_is_get_only_and_rejects_unknown_addresses(){

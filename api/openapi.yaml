@@ -45,6 +45,23 @@ paths:
               schema: {$ref: "#/components/schemas/LedgerCheckpoint"}
         "404": {$ref: "#/components/responses/ApiError"}
         "503": {$ref: "#/components/responses/ApiError"}
+  /v1/wallet/classic-recipient/{address}:
+    get:
+      operationId: classicRecipientPresence
+      summary: Testnet Horizon classic-account presence without balance, ownership or asset claims
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema: {type: string, minLength: 56, maxLength: 56}
+      responses:
+        "200":
+          description: Verified Testnet G-account lookup; no trustline, financial or identity claims
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ClassicRecipientPresence"}
+        "400": {$ref: "#/components/responses/ApiError"}
+        "503": {$ref: "#/components/responses/ApiError"}
   /v1/wallet/recipient/{address}:
     get:
       operationId: recipientPresence
@@ -519,6 +536,20 @@ components:
         issuer_verified: {type: boolean, const: false}
         privacy_verified: {type: boolean, const: false}
         fiat_payouts_enabled: {type: boolean, const: false}
+    ClassicRecipientPresence:
+      type: object
+      additionalProperties: false
+      required: [schema_version, network, source, address, observed_at_unix, classic_account_found, ownership_verified, asset_acceptance_verified, payment_execution_enabled]
+      properties:
+        schema_version: {type: integer, const: 1}
+        network: {type: string, const: testnet}
+        source: {type: string, const: stellar-horizon/account-presence}
+        address: {type: string, minLength: 56, maxLength: 56}
+        observed_at_unix: {type: integer, minimum: 1}
+        classic_account_found: {type: boolean}
+        ownership_verified: {type: boolean, const: false}
+        asset_acceptance_verified: {type: boolean, const: false}
+        payment_execution_enabled: {type: boolean, const: false}
     RecipientPresence:
       type: object
       additionalProperties: false
