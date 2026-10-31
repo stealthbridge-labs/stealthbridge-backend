@@ -1570,7 +1570,7 @@ mod tests {
         }
         assert_eq!(parse_corridor_batch_ids(&format!("{a},{a}")),Err(StatusCode::BAD_REQUEST));
         assert_eq!(parse_corridor_batch_ids(&a.to_string().to_uppercase()),Err(StatusCode::BAD_REQUEST));
-        assert_eq!(parse_corridor_batch_ids(&format!("{a},{b},{}",a.to_string())),Err(StatusCode::BAD_REQUEST));
+        assert_eq!(parse_corridor_batch_ids(&format!("{a},{b},{a}")),Err(StatusCode::BAD_REQUEST));
         assert_eq!(parse_corridor_batch_ids(&vec![a.to_string();9].join(",")),Err(StatusCode::BAD_REQUEST));
         let sample = Corridor {
             id:b,origin_country:"NG".to_owned(),destination_country:"GH".to_owned(),
