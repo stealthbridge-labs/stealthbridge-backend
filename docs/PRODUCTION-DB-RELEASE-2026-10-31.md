@@ -1,5 +1,24 @@
 # Production SQLx release handoff — 31 October 2026
 
+## Production deployment verified after original preflight
+
+At 2026-10-31 11:13 UTC, the protected SQLx GitHub Actions workflow
+successfully applied the five previously missing migrations to the Neon
+production primary. GitHub Actions run 41195889719 completed successfully,
+following successful inspection run 41195646611. Independent Neon read-only
+queries confirm twelve successful registered versions and required new
+tables, including customer profiles, organizational invitations, review
+records and contract-event metadata.
+
+The live backend now returns 200 from /ready with database: connected and
+payments: disabled. The schema endpoint returns current, 12/12; diagnostics
+returns database: ready and read_only_ready: true. Financial execution,
+privacy proof verification and fiat payouts remain false.
+
+The evidence below describes the historical BEFORE state, not a still-pending
+production migration. Do not re-run the apply workflow solely because the
+original seven-version snapshot is documented here.
+
 ## Evidence: isolated branch, not production
 
 - Neon project late-resonance-01145687; database neondb; primary br-fragrant-night-b7s83g65 (main).
@@ -8,7 +27,7 @@
 - SQLx CLI 0.8.6 successfully applied the five pending repository migrations to that isolated branch. All 12 versions registered with correct checksums through SQLx.
 - All eight new relations exist, including account challenge, contract event journal, business reviewer, customer profile and team invitation tables.
 - Repository source validator and its six tests passed. Production remained unchanged.
-- Production live GET /v1/observer/schema still reports migrations-pending and GET /ready returns HTTP 503.
+- Historical PRE-APPLY observation: production GET /v1/observer/schema reported migrations-pending, and GET /ready returned HTTP 503. These observations were superseded by successful application.
 
 ## Protected production GitHub workflow
 
