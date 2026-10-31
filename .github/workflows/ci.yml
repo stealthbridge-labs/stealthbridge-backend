@@ -52,7 +52,7 @@ jobs:
       - name: Check backend API against pinned SDK and frontend source
         env:
           STEALTHBRIDGE_SDK_REF: eebffb78634f83edce0dd28b1300dc7be5d79c69
-          STEALTHBRIDGE_FRONTEND_REF: 2abf0284b89d5c7edd523bf3bc9c0d55afbd93ff
+          STEALTHBRIDGE_FRONTEND_REF: 2ea8bff6a2a6759de30e9eb260b4f8644639dac5
         run: python3 scripts/verify_consumer_contracts.py
       - name: Check real deployed governance evidence against reviewed contracts commit
         run: |
