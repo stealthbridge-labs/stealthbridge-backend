@@ -868,7 +868,16 @@ mod postgres_tests {
         .execute(&db)
         .await
         .unwrap();
-        assert!(list(&db, TARGET, None).await.unwrap().received.is_empty());
+        // The recipient inbox spans independent organizations. Another
+        // concurrently running PostgreSQL test may legitimately invite TARGET
+        // to its own tenant. Verify only this revoked owner's invitations are
+        // hidden, without assuming all other tenant invitations disappeared.
+        assert!(!list(&db, TARGET, None)
+            .await
+            .unwrap()
+            .received
+            .iter()
+            .any(|item| item.organization_id == org));
         assert!(matches!(
             apply(
                 &db,
