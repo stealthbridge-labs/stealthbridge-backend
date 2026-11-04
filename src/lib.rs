@@ -24,3 +24,4 @@ pub mod governance_release;
 pub mod governance_code;
 pub mod governance_admin;
 pub mod governance_consistency;
+pub mod privacy_commitment;
