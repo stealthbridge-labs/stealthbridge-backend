@@ -25,3 +25,4 @@ pub mod governance_code;
 pub mod governance_admin;
 pub mod governance_consistency;
 pub mod privacy_commitment;
+pub mod customer_ciphertext_vault;

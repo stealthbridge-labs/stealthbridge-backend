@@ -11,9 +11,12 @@ SERVER=(ROOT/"src/server.rs").read_text()
 class MigrationSafetyTests(unittest.TestCase):
  def test_migrations_and_readiness_have_exact_parity(self):
     self.assertEqual(validate_sources(FILES,SERVER),12)
- def test_missing_migration_is_rejected(self):
-    with self.assertRaisesRegex(ValueError,"readiness migration manifest"):
+ def test_missing_optional_migration_is_rejected(self):
+    with self.assertRaisesRegex(ValueError,"optional ciphertext vault migration is missing"):
      validate_sources(FILES[:-1],SERVER)
+ def test_optional_migration_remains_additive_and_not_a_readiness_dependency(self):
+    self.assertNotIn("202611040001",SERVER.split("const REQUIRED_SCHEMA_VERSIONS",1)[1].split("];",1)[0])
+    self.assertEqual(validate_sources(FILES,SERVER),12)
  def test_new_unreviewed_drop_is_rejected(self):
     rows=copy.deepcopy(FILES)
     index=next(i for i,(name,_) in enumerate(rows) if name.startswith("202610130002"))

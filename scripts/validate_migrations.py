@@ -9,7 +9,11 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 VERSION_RE=re.compile(r"^(\d{12})_[a-z0-9_]+\.sql$")
 SCHEMA_RE=re.compile(r"const REQUIRED_SCHEMA_VERSIONS: \[i64; (\d+)\] = \[([\s\S]*?)\];")
-ADDITIVE_ONLY=(202610130001,202610130002,202610150001,202610210001,202610270001)
+# The private draft vault is opt-in and is not part of the existing
+# production readiness contract until the protected migration is applied.
+# Do not block unrelated network and catalog reads on an unreleased vault.
+OPTIONAL_MIGRATIONS=(202611040001,)
+ADDITIVE_ONLY=(202610130001,202610130002,202610150001,202610210001,202610270001,*OPTIONAL_MIGRATIONS)
 REQUIRED_TABLES=(
     "organization_invitations",
     "customer_profiles",
@@ -42,12 +46,16 @@ def validate_sources(files,server):
             # An FK ON DELETE RESTRICT protects parent records; it is not
             # a DELETE DML statement and must not trip the destructive guard.
             stripped=re.sub(r"\bON\s+DELETE\s+RESTRICT\b","",stripped,flags=re.I)
+            # SQL enum/check string literals are data, not DELETE DML.
+            stripped=re.sub(r"'(?:''|[^'])*'","''",stripped)
             require(not re.search(r"\b(DROP|TRUNCATE|DELETE|UPDATE|GRANT|REVOKE)\b",
                                   stripped,re.I),
                     f"migration {version} performs unreviewed destructive or permission SQL")
     require(file_versions==sorted(file_versions) and
             len(file_versions)==len(set(file_versions)),"SQLx migration filenames must be unique and sorted")
-    require(server_versions==file_versions and len(file_versions)==requested_count,
+    require(set(OPTIONAL_MIGRATIONS).issubset(file_versions),"optional ciphertext vault migration is missing")
+    required=[version for version in file_versions if version not in OPTIONAL_MIGRATIONS]
+    require(server_versions==required and len(required)==requested_count,
             "backend readiness migration manifest drifts from SQLx files")
     query=server.split("async fn database_schema_ready",1)[1]
     require(f"COUNT(*) = {requested_count}" in query,
