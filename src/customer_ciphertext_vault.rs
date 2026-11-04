@@ -35,19 +35,48 @@ struct EncryptedEnvelope {
     iv: String,
     ciphertext: String,
 }
-fn b64url_sane(s: &str, min: usize, max: usize) -> bool {
-    (min..=max).contains(&s.len())
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+/// Decode only minimal, unpadded canonical RFC 4648 base64url. Reject
+/// non-zero discarded bits, invalid alphabet, oversized ciphertext and empty
+/// tags before storing untrusted encrypted data. No extra crate dependency.
+fn canonical_b64url(s: &str, min: usize, max: usize) -> bool {
+    if s.is_empty() || s.len() > 4096 || s.len() % 4 == 1 {
+        return false;
+    }
+    let mut acc: u32 = 0;
+    let mut bits: u8 = 0;
+    let mut decoded = 0usize;
+    for b in s.bytes() {
+        let n = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'-' => 62,
+            b'_' => 63,
+            _ => return false,
+        };
+        acc = (acc << 6) | u32::from(n);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            decoded += 1;
+            acc &= (1u32 << bits) - 1;
+        }
+        if decoded > max {
+            return false;
+        }
+    }
+    (min..=max).contains(&decoded) && acc == 0
 }
 impl EncryptedEnvelope {
     fn valid(&self) -> bool {
-        self.schema_version==1&&self.network=="testnet"&&self.cipher=="AES-256-GCM"&&
-  self.kdf=="PBKDF2-HMAC-SHA256"&&self.iterations==600_000&&
-  b64url_sane(&self.salt,22,22)&&b64url_sane(&self.iv,16,16)&&
-  b64url_sane(&self.ciphertext,24,4096)&&
-  // 16 random bytes and 12 nonce bytes encode to exact unpadded lengths.
-  self.salt.ends_with(|c:char|c.is_ascii_alphanumeric()||c=='_'||c=='-')
+        self.schema_version == 1
+            && self.network == "testnet"
+            && self.cipher == "AES-256-GCM"
+            && self.kdf == "PBKDF2-HMAC-SHA256"
+            && self.iterations == 600_000
+            && canonical_b64url(&self.salt, 16, 16)
+            && canonical_b64url(&self.iv, 12, 12)
+            && canonical_b64url(&self.ciphertext, 17, 3072)
     }
 }
 #[derive(Deserialize)]
@@ -313,11 +342,26 @@ mod tests {
             cipher: "AES-256-GCM".into(),
             kdf: "PBKDF2-HMAC-SHA256".into(),
             iterations: 600000,
-            salt: "x".repeat(22),
-            iv: "y".repeat(16),
-            ciphertext: "z".repeat(30),
+            salt: "A".repeat(22),
+            iv: "A".repeat(16),
+            ciphertext: "A".repeat(28),
         };
         assert!(good.valid());
+        assert!(!EncryptedEnvelope {
+            salt: "B".repeat(22), // last two pad bits must be zero
+            ..good.clone()
+        }
+        .valid());
+        assert!(!EncryptedEnvelope {
+            iv: "=".repeat(16), // padding is forbidden
+            ..good.clone()
+        }
+        .valid());
+        assert!(!EncryptedEnvelope {
+            ciphertext: "A".repeat(24) + "=", // padded tags rejected
+            ..good.clone()
+        }
+        .valid());
         assert!(!EncryptedEnvelope {
             iterations: 1,
             ..good.clone()
@@ -329,6 +373,18 @@ mod tests {
         }
         .valid());
         assert!(serde_json::from_str::<EncryptedEnvelope>(r#"{"schema_version":1,"network":"testnet","cipher":"AES-256-GCM","kdf":"PBKDF2-HMAC-SHA256","iterations":600000,"salt":"AAAAAAAAAAAAAAAAAAAAAA","iv":"AAAAAAAAAAAAAAAA","ciphertext":"AAAAAAAAAAAAAAAAAAAAAAAA","payment_authorized":true}"#).is_err());
+    }
+    #[test]
+    fn canonical_encoding_matches_browser_and_rejects_nonminimal_data() {
+        assert!(canonical_b64url("AAAAAAAAAAAAAAAAAAAAAA", 16, 16));
+        assert!(!canonical_b64url("AAAAAAAAAAAAAAAAAAAAAB", 16, 16));
+        assert!(!canonical_b64url("AAAAAAAAAAAAAAAAAAAAA=", 16, 16));
+        assert!(!canonical_b64url("AA+A", 3, 3));
+        assert!(!canonical_b64url("A", 0, 4));
+        assert!(!canonical_b64url("AAAAAAAAAAAAAAAA", 16, 16));
+        assert!(canonical_b64url("AAAAAAAAAAAAAAAA", 12, 12));
+        assert!(canonical_b64url(&"A".repeat(24), 17, 3072));
+        assert!(!canonical_b64url(&"A".repeat(4097), 17, 3072));
     }
     #[test]
     fn rejects_unsigned_and_cross_network_requests() {
@@ -368,6 +424,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn postgres_vault_caps_slots_even_with_competing_writers() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let db = PgPool::connect(&url).await.expect("isolated CI database");
+        sqlx::migrate!("./migrations")
+            .run(&db)
+            .await
+            .expect("vault migration");
+        // A different account from the other integration test; no shared
+        // cross-test row count or operator identity required.
+        let owner = "GC3YRVLB7IN7SNUYVWFUC6OD3QWJXCUZ4HOBNIPVGY7BZDVOYMDNX5TN";
+        let data = EncryptedEnvelope {
+            schema_version: 1,
+            network: "testnet".into(),
+            cipher: "AES-256-GCM".into(),
+            kdf: "PBKDF2-HMAC-SHA256".into(),
+            iterations: 600000,
+            salt: "A".repeat(22),
+            iv: "A".repeat(16),
+            ciphertext: "A".repeat(40),
+        };
+        assert!(data.valid());
+        let mut inserted = Vec::new();
+        for _ in 0..7 {
+            let id = Uuid::new_v4();
+            assert!(
+                mutate(&db, owner, Uuid::new_v4(), "PUT", id, 0, Some(&data))
+                    .await
+                    .unwrap()
+            );
+            inserted.push(id);
+        }
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        let a = mutate(&db, owner, Uuid::new_v4(), "PUT", first, 0, Some(&data));
+        let b = mutate(&db, owner, Uuid::new_v4(), "PUT", second, 0, Some(&data));
+        let (one, two) = tokio::join!(a, b);
+        assert_ne!(
+            one.unwrap(),
+            two.unwrap(),
+            "exactly one ninth-slot contender must fail"
+        );
+        let rows = sqlx::query(SELECT)
+            .bind(owner)
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 8);
+        for row in rows {
+            let id: Uuid = row.try_get("draft_id").unwrap();
+            assert!(mutate(&db, owner, Uuid::new_v4(), "DELETE", id, 1, None)
+                .await
+                .unwrap());
+        }
+        assert!(sqlx::query(SELECT)
+            .bind(owner)
+            .fetch_all(&db)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+    #[tokio::test]
     async fn postgres_vault_is_account_scoped_revisioned_and_replay_safe() {
         let Ok(url) = std::env::var("DATABASE_URL") else {
             return;
@@ -387,9 +506,9 @@ mod tests {
             cipher: "AES-256-GCM".into(),
             kdf: "PBKDF2-HMAC-SHA256".into(),
             iterations: 600000,
-            salt: "a".repeat(22),
-            iv: "b".repeat(16),
-            ciphertext: "c".repeat(40),
+            salt: "A".repeat(22),
+            iv: "A".repeat(16),
+            ciphertext: "A".repeat(40),
         };
         assert!(mutate(&db, owner, nonce, "PUT", record, 0, Some(&data))
             .await

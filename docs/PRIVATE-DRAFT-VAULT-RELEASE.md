@@ -57,3 +57,23 @@ read plaintext during local editing. Passkey/WebAuthn PRF wrapping, more scalabl
 multi-device recovery, encryption key rotation, incident procedures and external
 cryptographic review remain future work. Ciphertext authenticated integrity does
 not establish ZK confidentiality of any future on-chain payment.
+
+## Opaque record lifecycle and concurrency proof
+
+An existing cloud slot is updated via authenticated PUT with its current
+`expected_revision`, and stored with a strictly increasing revision (up to
+1,000,000). Client-side re-encryption uses fresh AES-GCM salt and nonce;
+PostgreSQL only sees an opaque replacement JSON value. The same account-scoped
+advisory lock serializes first writes and updates, preventing two simultaneous
+inserts from exceeding eight records. A failed compare-and-swap, duplicate
+nonce, full account or wrong-owner delete returns 409 and rolls back the
+transaction. No recovery secret is collected, recorded or available to an
+operator.
+
+Rust independently validates strictly unpadded canonical base64url for
+salt (16 bytes), IV (12 bytes) and ciphertext (17–3072 bytes).
+Nonzero discarded bits, padded encodings, invalid characters and unexpected
+fields are rejected without being saved. This is for encoding bounds only:
+Rust does not decrypt customer content or certify confidentiality of transfers.
+A CI PostgreSQL race regression starts from seven slots, runs two competing
+writers and requires exactly eight resulting records; both are cleaned up.
