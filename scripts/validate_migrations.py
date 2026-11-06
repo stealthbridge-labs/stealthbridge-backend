@@ -39,6 +39,15 @@ def validate_sources(files,server):
         version=int(parsed.group(1))
         file_versions.append(version)
         require(bool(source.strip()),f"migration {version} is empty")
+        if version in OPTIONAL_MIGRATIONS:
+            expected=(
+                "customer_ciphertext_drafts", "customer_ciphertext_draft_receipts",
+                "PRIMARY KEY(account_address,draft_id)", "nonce UUID PRIMARY KEY",
+                "octet_length(envelope::text)<=4096", "revision BETWEEN 1 AND 1000000",
+                "account_address VARCHAR(56) NOT NULL",
+            )
+            for item in expected:
+                require(item in source, f"ciphertext vault migration missing bound: {item}")
         if version in ADDITIVE_ONLY:
             require("CREATE TABLE IF NOT EXISTS" in source,
                     f"additive migration {version} must create tables safely")
