@@ -423,6 +423,36 @@ mod tests {
         assert!(authorized(&headers, &state, "PUT", body, now_unix() + 40).is_none());
     }
 
+    #[test]
+    fn signed_vault_requests_reject_wrong_account_timestamp_and_nonce() {
+        let mut state = AppState::without_db();
+        let secret=b"vault-bridge-dev-fixture-only-32-bytes-secure";
+        state.account_bridge_secret=Some(Arc::new(secret.to_vec()));
+        let account="GAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB7JZX";
+        let issued=now_unix().to_string();
+        let nonce=Uuid::new_v4().to_string();
+        let body=b"{\"encrypted\":\"ciphertext-only\"}";
+        let digest=hex::encode(Sha256::digest(body));
+        let payload=format!("{DOMAIN}\nPUT\n{PATH}\n{account}\n{issued}\n{nonce}\n{digest}\n");
+        let mut mac=HmacSha256::new_from_slice(secret).unwrap();
+        mac.update(payload.as_bytes());
+        let signature=hex::encode(mac.finalize().into_bytes());
+        let mut headers=HeaderMap::new();
+        headers.insert("x-stealthbridge-account",account.parse().unwrap());
+        headers.insert("x-stealthbridge-issued-at",issued.parse().unwrap());
+        headers.insert("x-stealthbridge-nonce",nonce.parse().unwrap());
+        headers.insert("x-stealthbridge-signature",signature.parse().unwrap());
+        assert!(authorized(&headers,&state,"PUT",body,now_unix()).is_some());
+        let mut forged=headers.clone();
+        forged.insert("x-stealthbridge-account",
+            "GC3YRVLB7IN7SNUYVWFUC6OD3QWJXCUZ4HOBNIPVGY7BZDVOYMDNX5TN".parse().unwrap());
+        assert!(authorized(&forged,&state,"PUT",body,now_unix()).is_none());
+        let mut forged=headers.clone();
+        forged.insert("x-stealthbridge-nonce",Uuid::new_v4().to_string().parse().unwrap());
+        assert!(authorized(&forged,&state,"PUT",body,now_unix()).is_none());
+        assert!(authorized(&headers,&state,"PUT",body,now_unix()+31).is_none());
+        assert!(authorized(&headers,&state,"DELETE",body,now_unix()).is_none());
+    }
     #[tokio::test]
     async fn postgres_vault_caps_slots_even_with_competing_writers() {
         let Ok(url) = std::env::var("DATABASE_URL") else {
