@@ -72,6 +72,17 @@ impl AssetAmount {
         if value<0{return Err(AmountError::InsufficientAmount);}
         Self::from_minor_units(self.asset.clone(), value)
     }
+    /// Sum a nonempty batch using exact minor units. Prevents aggregate
+    /// overflow and accidental mixing of issuer, network or decimal scale.
+    /// This is an offline preparation helper, never a liquidity check.
+    pub fn checked_sum(parts: &[Self]) -> Result<Self, AmountError> {
+        let first = parts.first().ok_or(AmountError::InvalidInput)?;
+        let mut total = Self::from_minor_units(first.asset.clone(), 0)?;
+        for part in parts {
+            total = total.checked_add(part)?;
+        }
+        Ok(total)
+    }
     pub fn decimal_string(&self)->String{
         let scale=10_i128.pow(self.asset.decimals);
         let whole=self.minor_units/scale;
@@ -117,6 +128,21 @@ mod tests{
     assert_eq!(AssetAmount::parse(classic.clone(),"922337203685.4775808"),Err(AmountError::Overflow));
     assert_eq!(AssetAmount::parse(classic.clone(),"0.00000001"),Err(AmountError::PrecisionLoss));
     assert_eq!(AssetAmount::parse(Asset { decimals: 8, ..classic },"1"),Err(AmountError::InvalidAsset));
+  }
+  #[test]fn aggregate_batch_uses_only_exact_scoped_minor_units(){
+    let first=AssetAmount::parse(asset(),"0.1").unwrap();
+    let second=AssetAmount::parse(asset(),"0.2").unwrap();
+    let sum=AssetAmount::checked_sum(&[first.clone(),second.clone()]).unwrap();
+    assert_eq!(sum.decimal_string(),"0.3");
+    assert_eq!(AssetAmount::checked_sum(&[]),Err(AmountError::InvalidInput));
+    let mut different=asset();
+    different.identity="other:issuer".into();
+    assert_eq!(AssetAmount::checked_sum(&[first,AssetAmount::parse(different,"0.2").unwrap()]),
+      Err(AmountError::AssetMismatch));
+    let huge=Asset{network:"testnet",identity:"classic:native".into(),decimals:7};
+    let high=AssetAmount::from_minor_units(huge.clone(),i64::MAX as i128).unwrap();
+    let one=AssetAmount::from_minor_units(huge,1).unwrap();
+    assert_eq!(AssetAmount::checked_sum(&[high,one]),Err(AmountError::Overflow));
   }
   #[test]fn prevents_cross_asset_and_overflow(){
     let a=AssetAmount::parse(asset(),"1").unwrap();
