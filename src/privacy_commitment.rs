@@ -58,6 +58,11 @@ pub fn digest_review_draft(d: &ReviewDraft<'_>,nonce_hex:&str)->Result<String,&'
     if !all_ascii(nonce_hex,64,64,|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b)) {
         return Err("invalid_local_review_nonce");
     }
+    // A fixed all-zero nonce is an unsafe deterministic review receipt.
+    // No server-side review verifier is introduced: preimages remain local.
+    if nonce_hex.bytes().all(|b| b == b'0') {
+        return Err("invalid_local_review_nonce");
+    }
     let canonical=canonical_review_draft(d)?;
     let digest=Sha256::digest(format!("{DOMAIN} nonce:{nonce_hex}\n{canonical}").as_bytes());
     Ok(hex::encode(digest))
@@ -91,5 +96,24 @@ pub fn digest_review_draft(d: &ReviewDraft<'_>,nonce_hex:&str)->Result<String,&'
         d.reference="INV_248";d.recipient="GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
         assert!(canonical_review_draft(&d).is_err());
         assert!(digest_review_draft(&draft(),"aa").is_err());
+        assert!(digest_review_draft(&draft(),&"0".repeat(64)).is_err());
+        assert!(digest_review_draft(&draft(),&"A".repeat(64)).is_err());
+    }
+    #[test]fn independent_receipt_fields_always_change_the_digest(){
+        let nonce="a1".repeat(32);
+        let base=digest_review_draft(&draft(),&nonce).unwrap();
+        let mut d=draft();d.origin_country="GH";
+        assert_ne!(digest_review_draft(&d,&nonce).unwrap(),base);
+        let mut d=draft();d.destination_country="FR";
+        assert_ne!(digest_review_draft(&d,&nonce).unwrap(),base);
+        let mut d=draft();d.privacy_rail="private-payments";
+        assert_ne!(digest_review_draft(&d,&nonce).unwrap(),base);
+        let mut d=draft();d.asset_code="XLM";
+        assert_ne!(digest_review_draft(&d,&nonce).unwrap(),base);
+        let mut d=draft();d.asset_issuer=None;
+        assert_ne!(digest_review_draft(&d,&nonce).unwrap(),base);
+        let mut d=draft();d.corridor_id="b12ef783-d60b-4427-aa62-d2562acd4cef";
+        assert_ne!(digest_review_draft(&d,&nonce).unwrap(),base);
+        assert_ne!(digest_review_draft(&draft(),&"a2".repeat(32)).unwrap(),base);
     }
 }
