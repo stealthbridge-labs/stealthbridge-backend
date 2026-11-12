@@ -43,8 +43,25 @@ jobs:
           node --check api/runtime-node-probe.mjs
           python3 -m unittest scripts/test_runtime_control.py
       - run: cargo fmt --all
-      - run: cargo test --all-targets
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --all-targets --locked
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Check out reviewed SDK for real journal payload compatibility
+        uses: actions/checkout@v4
+        with:
+          repository: stealthbridge-labs/stealthbridge-sdk
+          ref: c4f56dd1ef32749146bd19c87af3b9eb3ad3ddec
+          path: compat-sdk
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Build independent SDK consumer
+        working-directory: compat-sdk
+        run: npm ci --ignore-scripts && npm run build
+      - name: Parse actual PostgreSQL outbox notifications with the reviewed SDK
+        env:
+          STEALTHBRIDGE_SDK_ENTRY: ${{ github.workspace }}/compat-sdk/dist/index.js
+        run: cargo test --locked --test journal_integration -- --nocapture
       - name: Test live-ledger freshness and safe degraded behavior
         run: python3 -m unittest scripts/test_smoke_testnet_http.py
       - name: Regression tests for canonical manifest and consumer API compatibility

@@ -2,7 +2,7 @@
 //! Internal database operations only: no external payouts or on-chain writes.
 
 use crate::settlement::{self, SettlementState};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 #[derive(Debug)]
@@ -25,6 +25,50 @@ pub struct RegisteredIntent {
     pub id: Uuid,
     /// True only if this call inserted the intent and its initial journal event.
     pub created: bool,
+}
+
+/// The journal and its notification are one transaction. Notifications contain
+/// state metadata only; consumers must re-read scoped authoritative state and
+/// must never treat an outbox message as permission to move funds.
+async fn append_transition(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    intent_id: Uuid,
+    previous: Option<SettlementState>,
+    next: SettlementState,
+    version: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO settlement_transition_log
+         (organization_id, settlement_id, previous_state, next_state, version)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(organization_id)
+    .bind(intent_id)
+    .bind(previous.map(SettlementState::as_str))
+    .bind(next.as_str())
+    .bind(version)
+    .execute(&mut **tx)
+    .await?;
+    let payload = serde_json::json!({
+        "schema_version": 1,
+        "previous_state": previous.map(SettlementState::as_str),
+        "next_state": next.as_str(),
+        // Preserve the full PostgreSQL BIGINT range for JavaScript consumers.
+        "version": version.to_string(),
+        "financial_execution_authorized": false,
+    });
+    sqlx::query(
+        "INSERT INTO settlement_outbox
+         (organization_id, settlement_id, event_type, payload)
+         VALUES ($1, $2, 'settlement.state_changed', $3)",
+    )
+    .bind(organization_id)
+    .bind(intent_id)
+    .bind(payload)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 /// Register a canonical request once per organization and idempotency key.
@@ -54,15 +98,14 @@ pub async fn register_intent(
     .await?;
 
     if let Some((id,)) = inserted {
-        sqlx::query(
-            "INSERT INTO settlement_transition_log
-             (organization_id, settlement_id, previous_state, next_state, version)
-             VALUES ($1, $2, NULL, $3, 0)",
+        append_transition(
+            &mut tx,
+            organization_id,
+            id,
+            None,
+            SettlementState::Draft,
+            0,
         )
-        .bind(organization_id)
-        .bind(id)
-        .bind(SettlementState::Draft.as_str())
-        .execute(&mut *tx)
         .await?;
         tx.commit().await?;
         return Ok(RegisteredIntent { id, created: true });
@@ -118,11 +161,11 @@ pub async fn advance_intent(
         return Err(JournalError::VersionConflict);
     }
     let old_name: String = row.try_get("state")?;
-    let old_state = SettlementState::parse(&old_name)
-        .ok_or(JournalError::InvalidTransition)?;
-    settlement::transition(old_state, next_state)
-        .map_err(|_| JournalError::InvalidTransition)?;
-    let new_version = version.checked_add(1).ok_or(JournalError::VersionConflict)?;
+    let old_state = SettlementState::parse(&old_name).ok_or(JournalError::InvalidTransition)?;
+    settlement::transition(old_state, next_state).map_err(|_| JournalError::InvalidTransition)?;
+    let new_version = version
+        .checked_add(1)
+        .ok_or(JournalError::VersionConflict)?;
 
     sqlx::query(
         "UPDATE settlement_intents SET state = $1, version = $2,
@@ -135,17 +178,14 @@ pub async fn advance_intent(
     .execute(&mut *tx)
     .await?;
 
-    sqlx::query(
-        "INSERT INTO settlement_transition_log
-         (organization_id, settlement_id, previous_state, next_state, version)
-         VALUES ($1, $2, $3, $4, $5)",
+    append_transition(
+        &mut tx,
+        organization_id,
+        intent_id,
+        Some(old_state),
+        next_state,
+        new_version,
     )
-    .bind(organization_id)
-    .bind(intent_id)
-    .bind(old_state.as_str())
-    .bind(next_state.as_str())
-    .bind(new_version)
-    .execute(&mut *tx)
     .await?;
     tx.commit().await?;
     Ok(new_version)

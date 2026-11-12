@@ -65,16 +65,19 @@ pub fn assess_upgrade(observation: &UpgradeObservation) -> UpgradeAssessment {
     };
     if pending.wasm_hash == [0; 32]
         || pending.ready_at_ledger == 0
-        || pending.expires_at_ledger.checked_sub(pending.ready_at_ledger) != Some(10_000)
+        || pending
+            .expires_at_ledger
+            .checked_sub(pending.ready_at_ledger)
+            != Some(10_000)
         || pending.wasm_hash != observation.candidate_wasm_hash
     {
         return assessment(WindowState::Invalid, false);
     }
-    if !observation.paused || observation.current_ledger < pending.ready_at_ledger {
-        return assessment(WindowState::Waiting, true);
-    }
     if observation.current_ledger > pending.expires_at_ledger {
         return assessment(WindowState::Expired, true);
+    }
+    if !observation.paused || observation.current_ledger < pending.ready_at_ledger {
+        return assessment(WindowState::Waiting, true);
     }
     assessment(WindowState::OpenUnverified, true)
 }
@@ -119,6 +122,8 @@ mod tests {
         item.current_ledger = 199;
         assert_eq!(assess_upgrade(&item).state, WindowState::Waiting);
         item.current_ledger = 10_201;
+        assert_eq!(assess_upgrade(&item).state, WindowState::Expired);
+        item.paused = false;
         assert_eq!(assess_upgrade(&item).state, WindowState::Expired);
         item.pending.as_mut().unwrap().wasm_hash = [8; 32];
         assert_eq!(assess_upgrade(&item).state, WindowState::Invalid);
