@@ -40,6 +40,14 @@ class MigrationSafetyTests(unittest.TestCase):
      altered[i]=(altered[i][0],altered[i][1].replace(needle,""))
      with self.subTest(needle=needle),self.assertRaisesRegex(ValueError,"ciphertext vault migration"):
       validate_sources(altered,SERVER)
+ def test_instruction_schema_cannot_lose_owner_replay_and_expiry_bounds(self):
+    for needle in ("PRIMARY KEY(account_address,id)","nonce UUID PRIMARY KEY",
+                   "expires_at_unix-created_at_unix BETWEEN 300 AND 86400"):
+     altered=copy.deepcopy(FILES)
+     i=next(i for i,(name,_) in enumerate(altered) if name.startswith("202611120001"))
+     altered[i]=(altered[i][0],altered[i][1].replace(needle,""))
+     with self.subTest(needle=needle),self.assertRaisesRegex(ValueError,"payment instruction migration"):
+      validate_sources(altered,SERVER)
  def test_missing_readiness_relation_is_rejected(self):
     with self.assertRaisesRegex(ValueError,"missing stellar_contract_event_journal"):
      validate_sources(FILES,SERVER.replace("to_regclass('stellar_contract_event_journal')","to_regclass('other')"))

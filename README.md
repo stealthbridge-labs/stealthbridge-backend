@@ -105,3 +105,7 @@ Reliable ledger observer operations and retention, exact provider evidence and r
 [Frontend](https://github.com/stealthbridge-labs/stealthbridge-frontend) · [SDK](https://github.com/stealthbridge-labs/stealthbridge-sdk) · [Contracts](https://github.com/stealthbridge-labs/stealthbridge-contracts) · [Integration guide](docs/INTEGRATION-GUIDE.md) · [Security](SECURITY.md)
 
 **Infrastructure readiness ≠ financial authorization. No customer funds.**
+
+## Open source
+
+StealthBridge is available under the [MIT license](LICENSE). Third-party dependencies retain their own licenses. Contributions should include meaningful tests and preserve customer privacy and disabled financial execution gates.

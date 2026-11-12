@@ -83,7 +83,7 @@ async fn limit_public_rpc_reads(
     next:Next,
 )->Response {
     let path=request.uri().path();
-    let costly=(path=="/v1/corridors/batch" || path=="/v1/corridors/batch/preflight") || (path.starts_with("/v1/corridors/") && path.ends_with("/preflight")) || path=="/v1/diagnostics" || path=="/v1/governance/snapshot" || path=="/v1/governance/admin" || path=="/v1/governance/code" || path=="/v1/governance/release" || path=="/v1/network" || (path.starts_with("/v1/wallet/contracts/") || path.starts_with("/v1/wallet/recipient/") || path.starts_with("/v1/wallet/classic-recipient/")) || path.starts_with("/v1/transactions/") || path.starts_with("/v1/business/reviews/");
+    let costly=(path=="/v1/account/instructions" || path=="/v1/corridors/batch" || path=="/v1/corridors/batch/preflight") || (path.starts_with("/v1/corridors/") && path.ends_with("/preflight")) || path=="/v1/diagnostics" || path=="/v1/governance/snapshot" || path=="/v1/governance/admin" || path=="/v1/governance/code" || path=="/v1/governance/release" || path=="/v1/network" || (path.starts_with("/v1/wallet/contracts/") || path.starts_with("/v1/wallet/recipient/") || path.starts_with("/v1/wallet/classic-recipient/")) || path.starts_with("/v1/transactions/") || path.starts_with("/v1/business/reviews/");
     if !costly || request.method()!=axum::http::Method::GET {
         return next.run(request).await;
     }
@@ -1512,6 +1512,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/diagnostics",get(dependency_diagnostics))
         .route("/internal/metrics",get(internal_metrics))
         .route("/v1/network",get(network))
+        .route("/v1/account/instructions", get(crate::payment_instructions::get).put(crate::payment_instructions::put).post(crate::payment_instructions::post).layer(axum::extract::DefaultBodyLimit::max(6000)))
         .route("/v1/account/directory",get(crate::account_directory::account_directory))
         .route("/v1/account/organizations/{id}/team",
             get(crate::organization_team::get_organization_team))

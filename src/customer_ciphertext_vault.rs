@@ -25,7 +25,7 @@ const MAX_SLOTS: i64 = 8;
 type HmacSha256 = Hmac<Sha256>;
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct EncryptedEnvelope {
+pub(crate) struct EncryptedEnvelope {
     schema_version: u8,
     network: String,
     cipher: String,
@@ -68,7 +68,7 @@ fn canonical_b64url(s: &str, min: usize, max: usize) -> bool {
     (min..=max).contains(&decoded) && acc == 0
 }
 impl EncryptedEnvelope {
-    fn valid(&self) -> bool {
+    pub(crate) fn valid(&self) -> bool {
         self.schema_version == 1
             && self.network == "testnet"
             && self.cipher == "AES-256-GCM"
@@ -121,12 +121,14 @@ fn enabled() -> bool {
         .as_deref()
         == Some("true")
 }
-fn authorized(
+pub(crate) fn authorize_account_request(
     headers: &HeaderMap,
     state: &AppState,
     method: &str,
     body: &[u8],
     now: i64,
+    domain: &str,
+    path: &str,
 ) -> Option<(String, Option<Uuid>)> {
     let secret = state
         .account_bridge_secret
@@ -166,11 +168,20 @@ fn authorized(
         return None;
     }
     let supplied = hex::decode(signature).ok()?;
-    let text = format!("{DOMAIN}\n{method}\n{PATH}\n{account}\n{issued}\n{raw_nonce}\n{digest}\n");
+    let text = format!("{domain}\n{method}\n{path}\n{account}\n{issued}\n{raw_nonce}\n{digest}\n");
     let mut mac = HmacSha256::new_from_slice(secret.as_ref()).ok()?;
     mac.update(text.as_bytes());
     mac.verify_slice(&supplied).ok()?;
     Some((account.into(), nonce))
+}
+fn authorized(
+    headers: &HeaderMap,
+    state: &AppState,
+    method: &str,
+    body: &[u8],
+    now: i64,
+) -> Option<(String, Option<Uuid>)> {
+    authorize_account_request(headers, state, method, body, now, DOMAIN, PATH)
 }
 fn response(account: String, rows: Vec<VaultRecord>) -> Response {
     (
@@ -426,32 +437,39 @@ mod tests {
     #[test]
     fn signed_vault_requests_reject_wrong_account_timestamp_and_nonce() {
         let mut state = AppState::without_db();
-        let secret=b"vault-bridge-dev-fixture-only-32-bytes-secure";
-        state.account_bridge_secret=Some(Arc::new(secret.to_vec()));
-        let account="GAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB7JZX";
-        let issued=now_unix().to_string();
-        let nonce=Uuid::new_v4().to_string();
-        let body=b"{\"encrypted\":\"ciphertext-only\"}";
-        let digest=hex::encode(Sha256::digest(body));
-        let payload=format!("{DOMAIN}\nPUT\n{PATH}\n{account}\n{issued}\n{nonce}\n{digest}\n");
-        let mut mac=HmacSha256::new_from_slice(secret).unwrap();
+        let secret = b"vault-bridge-dev-fixture-only-32-bytes-secure";
+        state.account_bridge_secret = Some(Arc::new(secret.to_vec()));
+        let account = "GAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB7JZX";
+        let issued = now_unix().to_string();
+        let nonce = Uuid::new_v4().to_string();
+        let body = b"{\"encrypted\":\"ciphertext-only\"}";
+        let digest = hex::encode(Sha256::digest(body));
+        let payload = format!("{DOMAIN}\nPUT\n{PATH}\n{account}\n{issued}\n{nonce}\n{digest}\n");
+        let mut mac = HmacSha256::new_from_slice(secret).unwrap();
         mac.update(payload.as_bytes());
-        let signature=hex::encode(mac.finalize().into_bytes());
-        let mut headers=HeaderMap::new();
-        headers.insert("x-stealthbridge-account",account.parse().unwrap());
-        headers.insert("x-stealthbridge-issued-at",issued.parse().unwrap());
-        headers.insert("x-stealthbridge-nonce",nonce.parse().unwrap());
-        headers.insert("x-stealthbridge-signature",signature.parse().unwrap());
-        assert!(authorized(&headers,&state,"PUT",body,now_unix()).is_some());
-        let mut forged=headers.clone();
-        forged.insert("x-stealthbridge-account",
-            "GC3YRVLB7IN7SNUYVWFUC6OD3QWJXCUZ4HOBNIPVGY7BZDVOYMDNX5TN".parse().unwrap());
-        assert!(authorized(&forged,&state,"PUT",body,now_unix()).is_none());
-        let mut forged=headers.clone();
-        forged.insert("x-stealthbridge-nonce",Uuid::new_v4().to_string().parse().unwrap());
-        assert!(authorized(&forged,&state,"PUT",body,now_unix()).is_none());
-        assert!(authorized(&headers,&state,"PUT",body,now_unix()+31).is_none());
-        assert!(authorized(&headers,&state,"DELETE",body,now_unix()).is_none());
+        let signature = hex::encode(mac.finalize().into_bytes());
+        let mut headers = HeaderMap::new();
+        headers.insert("x-stealthbridge-account", account.parse().unwrap());
+        headers.insert("x-stealthbridge-issued-at", issued.parse().unwrap());
+        headers.insert("x-stealthbridge-nonce", nonce.parse().unwrap());
+        headers.insert("x-stealthbridge-signature", signature.parse().unwrap());
+        assert!(authorized(&headers, &state, "PUT", body, now_unix()).is_some());
+        let mut forged = headers.clone();
+        forged.insert(
+            "x-stealthbridge-account",
+            "GC3YRVLB7IN7SNUYVWFUC6OD3QWJXCUZ4HOBNIPVGY7BZDVOYMDNX5TN"
+                .parse()
+                .unwrap(),
+        );
+        assert!(authorized(&forged, &state, "PUT", body, now_unix()).is_none());
+        let mut forged = headers.clone();
+        forged.insert(
+            "x-stealthbridge-nonce",
+            Uuid::new_v4().to_string().parse().unwrap(),
+        );
+        assert!(authorized(&forged, &state, "PUT", body, now_unix()).is_none());
+        assert!(authorized(&headers, &state, "PUT", body, now_unix() + 31).is_none());
+        assert!(authorized(&headers, &state, "DELETE", body, now_unix()).is_none());
     }
     #[tokio::test]
     async fn postgres_vault_caps_slots_even_with_competing_writers() {
