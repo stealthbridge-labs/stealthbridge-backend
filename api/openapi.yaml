@@ -45,6 +45,32 @@ paths:
               schema: {$ref: "#/components/schemas/LedgerCheckpoint"}
         "404": {$ref: "#/components/responses/ApiError"}
         "503": {$ref: "#/components/responses/ApiError"}
+  /v1/wallet/smart-account-kit:
+    get:
+      operationId: smartAccountKitHealth
+      summary: Read-only pinned Stellar Testnet smart-account-kit artifact health
+      description: >
+        One batched getLedgerEntries read across seven public release keys.
+        Testnet identity and a head closed within 180 seconds are required;
+        the entry observation must be within 15 head ledgers. Missing entries
+        are unavailable. Duplicate/unexpected keys and malformed XDR fail closed.
+        Code health requires canonical ContractCodeEntry XDR, independent SHA256
+        of WASM bytes, the embedded hash, pinned release hash, and pinned account
+        WASM size of 48273 bytes. Instance health verifies its key and executable.
+        No customer smart account or factory currently exists. Artifact health
+        is not payment readiness, authorization, recovery or privacy verification.
+        Startup/operator deployment only; users never deploy through this API.
+      responses:
+        "200":
+          description: Fresh upstream artifact observation; inspect every status and disabled flag
+          headers:
+            Cache-Control: {schema: {type: string, const: no-store}, description: Never cache ledger health}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SmartAccountKitObservation"}
+        "429": {$ref: "#/components/responses/ApiError"}
+        "502": {$ref: "#/components/responses/ApiError"}
+        "503": {$ref: "#/components/responses/ApiError"}
   /v1/wallet/classic-recipient/{address}:
     get:
       operationId: classicRecipientPresence
@@ -400,6 +426,114 @@ components:
         application/json:
           schema: {$ref: "#/components/schemas/ErrorEnvelope"}
   schemas:
+    SmartAccountKitEntry:
+      type: object
+      additionalProperties: false
+      required: [name, kind, expected_wasm_hash, observed_wasm_hash, status, live_until_ledger, ttl_remaining_ledgers]
+      properties:
+        name:
+          type: string
+          enum: [account_code, webauthn_instance, webauthn_code, threshold_instance, threshold_code, spendingLimit_instance, spendingLimit_code]
+        kind: {type: string, enum: [code, instance]}
+        expected_wasm_hash: {type: string, pattern: '^[0-9a-f]{64}$'}
+        observed_wasm_hash:
+          type: [string, 'null']
+          pattern: '^[0-9a-f]{64}$'
+          description: Independent SHA256 of code bytes, or the instance executable hash
+        status: {type: string, enum: [live, low_ttl, unavailable, mismatch]}
+        live_until_ledger:
+          type: [integer, 'null']
+          minimum: 1
+          maximum: 4294967295
+          description: Null for absent entries or RPC zero TTL; expired positive TTL is preserved
+        ttl_remaining_ledgers:
+          type: [integer, 'null']
+          minimum: 0
+          maximum: 4294967295
+          description: Null for absent, zero-sentinel or expired TTL; never fabricated
+    SmartAccountKitObservation:
+      type: object
+      additionalProperties: false
+      required: [schema_version, network, source, observed_at_unix, observed_ledger_sequence,
+        kit_version, entries, all_entries_healthy, customer_smart_account_factory_deployed,
+        customer_smart_account_created, credential_recovery_verified, privacy_proofs_verified,
+        mainnet_enabled, financial_execution_enabled, operator_managed_deployment]
+      properties:
+        schema_version: {type: integer, const: 1}
+        network: {type: string, const: testnet}
+        source: {type: string, const: stellar-rpc/pinned-smart-account-kit}
+        observed_at_unix: {type: integer, minimum: 1}
+        observed_ledger_sequence: {type: integer, minimum: 1, maximum: 4294967295}
+        kit_version: {type: string, const: 0.10.0}
+        entries:
+          type: array
+          minItems: 7
+          maxItems: 7
+          items: false
+          prefixItems:
+            - allOf:
+                - $ref: "#/components/schemas/SmartAccountKitEntry"
+                - properties:
+                    name: {const: account_code}
+                    kind: {const: code}
+                    expected_wasm_hash: {const: c514d35ea67eaea9bfc1fb3327854c0c06111bc1ddebd4fe217c504c1004b9e1}
+            - allOf:
+                - $ref: "#/components/schemas/SmartAccountKitEntry"
+                - properties:
+                    name: {const: webauthn_instance}
+                    kind: {const: instance}
+                    expected_wasm_hash: {const: e63a030d0f1a1481e36059a4837c433083b33e704c1f9625b7314795b6d72b76}
+            - allOf:
+                - $ref: "#/components/schemas/SmartAccountKitEntry"
+                - properties:
+                    name: {const: webauthn_code}
+                    kind: {const: code}
+                    expected_wasm_hash: {const: e63a030d0f1a1481e36059a4837c433083b33e704c1f9625b7314795b6d72b76}
+            - allOf:
+                - $ref: "#/components/schemas/SmartAccountKitEntry"
+                - properties:
+                    name: {const: threshold_instance}
+                    kind: {const: instance}
+                    expected_wasm_hash: {const: f72a11de6e2d5d2495d98fe61e04cd13544e64156a5a3be83ef8c2e403d14a94}
+            - allOf:
+                - $ref: "#/components/schemas/SmartAccountKitEntry"
+                - properties:
+                    name: {const: threshold_code}
+                    kind: {const: code}
+                    expected_wasm_hash: {const: f72a11de6e2d5d2495d98fe61e04cd13544e64156a5a3be83ef8c2e403d14a94}
+            - allOf:
+                - $ref: "#/components/schemas/SmartAccountKitEntry"
+                - properties:
+                    name: {const: spendingLimit_instance}
+                    kind: {const: instance}
+                    expected_wasm_hash: {const: 9bc17db0a804d6c82231a268c43bac1413650ea92cac0022e0d0a3b66ddc8189}
+            - allOf:
+                - $ref: "#/components/schemas/SmartAccountKitEntry"
+                - properties:
+                    name: {const: spendingLimit_code}
+                    kind: {const: code}
+                    expected_wasm_hash: {const: 9bc17db0a804d6c82231a268c43bac1413650ea92cac0022e0d0a3b66ddc8189}
+        all_entries_healthy:
+          type: boolean
+          description: True only when all seven rows are live with TTL strictly greater than 120960 ledgers
+        customer_smart_account_factory_deployed: {type: boolean, const: false}
+        customer_smart_account_created: {type: boolean, const: false}
+        credential_recovery_verified: {type: boolean, const: false}
+        privacy_proofs_verified: {type: boolean, const: false}
+        mainnet_enabled: {type: boolean, const: false}
+        financial_execution_enabled: {type: boolean, const: false}
+        operator_managed_deployment: {type: boolean, const: true}
+      allOf:
+        - if:
+            properties:
+              all_entries_healthy: {const: true}
+          then:
+            properties:
+              entries:
+                items:
+                  properties:
+                    status: {const: live}
+                    ttl_remaining_ledgers: {type: integer, minimum: 120961}
     ErrorEnvelope:
       type: object
       required: [error, trace_id]

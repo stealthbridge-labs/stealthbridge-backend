@@ -94,7 +94,7 @@ Do not infer that a schema is current from a Vercel deployment badge. The [produ
 
 Three **public governance contracts** were deployed on Stellar Testnet on **October 17, 2026**. Actual receipts and current observations are linked in the [Contracts release record](https://github.com/stealthbridge-labs/stealthbridge-contracts/blob/main/deployments/testnet/VERIFIED-GOVERNANCE-RELEASE-2026-10-17.md). Current source includes additional governance methods **not automatically deployed** to those historical instances. The legacy canonical v1 integration manifest still reads `not-deployed` and must not be mistaken for an on-chain verdict.
 
-Smart-account Testnet artifact verification and TTL checks are conducted in the contracts repository. A successful hash preflight is not deployed customer custody or recoverable passkey access.
+Smart-account Testnet artifact verification and TTL checks are conducted in the contracts repository. A successful hash preflight is not deployed customer custody or recoverable passkey access. Smart-account-kit upstream infrastructure health is available through the read-only `GET /v1/wallet/smart-account-kit` endpoint; see [the endpoint contract and limitations](docs/SMART-ACCOUNT-KIT.md). No customer smart account currently exists; upstream artifact health is not payment readiness.
 
 ## Next engineering work
 

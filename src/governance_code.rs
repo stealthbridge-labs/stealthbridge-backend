@@ -19,8 +19,11 @@ fn digit(b:u8)->Option<u8>{
  b'0'..=b'9'=>Some(b-b'0'+52),b'+'=>Some(62),b'/'=>Some(63),_=>None}
 }
 pub(crate) fn decode_base64(s:&str)->Result<Vec<u8>,()>{
+ decode_base64_bounded(s, 65_536)
+}
+pub(crate) fn decode_base64_bounded(s:&str,max_encoded_len:usize)->Result<Vec<u8>,()>{
  let b=s.as_bytes();
- if b.is_empty()||b.len()>65_536||!b.len().is_multiple_of(4){return Err(());}
+ if b.is_empty()||b.len()>max_encoded_len||!b.len().is_multiple_of(4){return Err(());}
  let mut out=Vec::with_capacity(b.len()/4*3);
  for (i,block) in b.as_chunks::<4>().0.iter().enumerate(){
   let last=i+1==b.len()/4;

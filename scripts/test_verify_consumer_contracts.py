@@ -2,7 +2,12 @@ import unittest
 import sys
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parent))
-from verify_consumer_contracts import CONSUMERS,required_fields,verify_contracts
+from verify_consumer_contracts import (
+    CONSUMERS,
+    required_fields,
+    verify_contracts,
+    verify_smart_account_kit_contract,
+)
 
 YAML=(Path(__file__).resolve().parents[1]/"api/openapi.yaml").read_text()
 def sdk_fixture():
@@ -48,5 +53,22 @@ class ConsumerContractTests(unittest.TestCase):
         altered=frontend_fixture().replace("networkResponse(", "ignoredNetwork(")
         with self.assertRaisesRegex(ValueError,"runtime response guards"):
             verify_contracts(YAML,YAML,altered,sdk,sdk)
+    def test_smart_account_kit_contract_parity_and_drift_rejection(self):
+        sdk_gen=""
+        for schema in ("SmartAccountKitEntry","SmartAccountKitObservation"):
+            fields=required_fields(YAML,schema)
+            sdk_gen+="export interface Api"+schema+" {\n"
+            sdk_gen+="".join(f"  {field}: unknown;\n" for field in fields)
+            sdk_gen+="}\n"
+        frontend_kit=(
+            'import type {ApiSmartAccountKitEntry,ApiSmartAccountKitObservation} from "./sdk-api-wire.v0.2.ts";\n'
+            "export interface SmartAccountKitEntry extends ApiSmartAccountKitEntry {}\n"
+            'export interface SmartAccountKit extends Omit<ApiSmartAccountKitObservation,"entries"> {}\n'
+        )
+        self.assertEqual(verify_smart_account_kit_contract(YAML,sdk_gen,frontend_kit),2)
+        with self.assertRaisesRegex(ValueError,"all_entries_healthy"):
+            verify_smart_account_kit_contract(YAML,sdk_gen.replace("  all_entries_healthy: unknown;\n",""),frontend_kit)
+        with self.assertRaisesRegex(ValueError,"SmartAccountKit must inherit"):
+            verify_smart_account_kit_contract(YAML,sdk_gen,frontend_kit.replace(" extends Omit<ApiSmartAccountKitObservation",""))
 
 if __name__=="__main__":unittest.main()

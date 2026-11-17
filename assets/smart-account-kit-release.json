@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "network": "testnet",
+  "network_passphrase": "Test SDF Network ; September 2015",
+  "kit_version": "0.10.0",
+  "reference_commit": "768ac041dad01b94a750b768fc650e67930afd28",
+  "source_manifest": "stealthbridge-contracts/tools/smart-account-preflight/src/manifest.mjs",
+  "source_helpers": "stealthbridge-contracts/tools/smart-account-preflight/src/audit-helpers.mjs",
+  "entries": [
+    {
+      "name": "account_code",
+      "kind": "code",
+      "expected_wasm_hash": "c514d35ea67eaea9bfc1fb3327854c0c06111bc1ddebd4fe217c504c1004b9e1",
+      "ledger_key": "AAAAB8UU016mfq6pv8H7MyeFTAwGERvB3evU/iF8UEwQBLnh",
+      "wasm_size": 48273
+    },
+    {
+      "name": "webauthn_instance",
+      "kind": "instance",
+      "contract_id": "CC7EKIHQP3TN4CARQDND6CEOY2UXLWWC2X5GHTD5NLAT7BG5GPZIOM3F",
+      "expected_wasm_hash": "e63a030d0f1a1481e36059a4837c433083b33e704c1f9625b7314795b6d72b76",
+      "ledger_key": "AAAABgAAAAG+RSDwfubeCBGA2j8IjsapddrC1fpjzH1qwT+E3TPyhwAAABQAAAAB"
+    },
+    {
+      "name": "webauthn_code",
+      "kind": "code",
+      "expected_wasm_hash": "e63a030d0f1a1481e36059a4837c433083b33e704c1f9625b7314795b6d72b76",
+      "ledger_key": "AAAAB+Y6Aw0PGhSB42BZpIN8QzCDsz5wTB+WJbcxR5W21yt2"
+    },
+    {
+      "name": "threshold_instance",
+      "kind": "instance",
+      "contract_id": "CAZ2WFUDXGX265LOEARFEOYYUL6F4BYWXZLGUAWZNJY3MRFPNLSZVS4S",
+      "expected_wasm_hash": "f72a11de6e2d5d2495d98fe61e04cd13544e64156a5a3be83ef8c2e403d14a94",
+      "ledger_key": "AAAABgAAAAEzqxaDua+vdW4gIlI7GKL8XgcWvlZqAtlqcbZEr2rlmgAAABQAAAAB"
+    },
+    {
+      "name": "threshold_code",
+      "kind": "code",
+      "expected_wasm_hash": "f72a11de6e2d5d2495d98fe61e04cd13544e64156a5a3be83ef8c2e403d14a94",
+      "ledger_key": "AAAAB/cqEd5uLV0kldmP5h4EzRNUTmQValo76D74wuQD0UqU"
+    },
+    {
+      "name": "spendingLimit_instance",
+      "kind": "instance",
+      "contract_id": "CC3CEYQAP6NPNFIYSWL5MVZRCPJZGWX4XO7WDEJOUVGO2FZX5OONYPA5",
+      "expected_wasm_hash": "9bc17db0a804d6c82231a268c43bac1413650ea92cac0022e0d0a3b66ddc8189",
+      "ledger_key": "AAAABgAAAAG2ImIAf5r2lRiVl9ZXMRPTk1r8u79hkS6lTO0XN+uc3AAAABQAAAAB"
+    },
+    {
+      "name": "spendingLimit_code",
+      "kind": "code",
+      "expected_wasm_hash": "9bc17db0a804d6c82231a268c43bac1413650ea92cac0022e0d0a3b66ddc8189",
+      "ledger_key": "AAAAB5vBfbCoBNbIIjGiaMQ7rBQTZQ6pLKwAIuDQo7Zt3IGJ"
+    }
+  ]
+}

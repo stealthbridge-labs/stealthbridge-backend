@@ -41,10 +41,10 @@ def required_fields(yaml, name):
         raise ValueError(f"Missing schema {name}")
     next_match=re.search(r"(?m)^    [A-Z][A-Za-z0-9]+:\s*$",content[match.end():])
     block=content[match.end():match.end()+next_match.start() if next_match else None]
-    required=re.search(r"(?m)^      required: \[([^\]]+)\]$",block)
+    required=re.search(r"(?m)^      required:\s*\[([^\]]+)\]",block)
     if not required:
         raise ValueError(f"Required fields missing in {name}")
-    keys=[item.strip() for item in required.group(1).split(",")]
+    keys=[item.strip() for item in required.group(1).replace("\n"," ").split(",") if item.strip()]
     actual=set(re.findall(r"(?m)^        ([a-z_]+):",block))
     if set(keys)-actual:
         raise ValueError(f"Missing OpenAPI property for {name}")
@@ -82,6 +82,22 @@ def verify_contracts(backend_yaml, pinned_sdk_yaml, frontend_types,
                 raise ValueError(f"Generated SDK {model} missing required API property {field}")
     return len(CONSUMERS)
 
+def verify_smart_account_kit_contract(backend_yaml, canonical_sdk_generated, frontend_smart_account_kit):
+    for schema in ("SmartAccountKitEntry", "SmartAccountKitObservation"):
+        model = "Api" + schema
+        required = required_fields(backend_yaml, schema)
+        actual = generated_fields(canonical_sdk_generated, model)
+        for field in required:
+            if field not in actual:
+                raise ValueError(f"Generated SDK {model} missing required API property {field}")
+    if "./sdk-api-wire.v0.2" not in frontend_smart_account_kit:
+        raise ValueError("Frontend smart-account-kit must import the reviewed SDK wire models")
+    if "SmartAccountKitEntry extends ApiSmartAccountKitEntry" not in frontend_smart_account_kit:
+        raise ValueError("Frontend SmartAccountKitEntry must inherit ApiSmartAccountKitEntry")
+    if "SmartAccountKit extends Omit<ApiSmartAccountKitObservation" not in frontend_smart_account_kit:
+        raise ValueError("Frontend SmartAccountKit must inherit ApiSmartAccountKitObservation")
+    return 2
+
 def main():
     api=(ROOT/"api/openapi.yaml").read_text()
     sdk=load_remote(SDK_REPO, os.environ.get("STEALTHBRIDGE_SDK_REF"),
@@ -90,10 +106,13 @@ def main():
                          "src/lib/bridge-api.ts")
     frontend_mirror=load_remote(FRONTEND_REPO, os.environ.get("STEALTHBRIDGE_FRONTEND_REF"),
                                 "src/lib/sdk-api-wire.v0.2.ts")
+    frontend_kit=load_remote(FRONTEND_REPO, os.environ.get("STEALTHBRIDGE_FRONTEND_REF"),
+                             "src/lib/smart-account-kit.ts")
     sdk_generated=load_remote(SDK_REPO, os.environ.get("STEALTHBRIDGE_SDK_REF"),
                               "src/generated/api-wire.ts")
     count=verify_contracts(api,sdk,frontend,frontend_mirror,sdk_generated)
-    print(f"PASS: backend API matches pinned SDK source and {count} frontend response interfaces")
+    kit_count=verify_smart_account_kit_contract(api,sdk_generated,frontend_kit)
+    print(f"PASS: backend API matches pinned SDK source and {count}+{kit_count} frontend response interfaces")
 
 if __name__=="__main__":
     main()

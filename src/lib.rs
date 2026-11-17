@@ -8,6 +8,7 @@ pub mod authz;
 pub mod webhook;
 pub mod wallet;
 pub mod smart_account;
+pub mod smart_account_kit;
 pub mod org_auth;
 pub mod account_directory;
 pub mod business_onboarding;

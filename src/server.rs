@@ -83,7 +83,7 @@ async fn limit_public_rpc_reads(
     next:Next,
 )->Response {
     let path=request.uri().path();
-    let costly=(path=="/v1/account/instructions" || path=="/v1/corridors/batch" || path=="/v1/corridors/batch/preflight") || (path.starts_with("/v1/corridors/") && path.ends_with("/preflight")) || path=="/v1/diagnostics" || path=="/v1/governance/snapshot" || path=="/v1/governance/admin" || path=="/v1/governance/code" || path=="/v1/governance/release" || path=="/v1/network" || (path.starts_with("/v1/wallet/contracts/") || path.starts_with("/v1/wallet/recipient/") || path.starts_with("/v1/wallet/classic-recipient/")) || path.starts_with("/v1/transactions/") || path.starts_with("/v1/business/reviews/");
+    let costly=(path=="/v1/wallet/smart-account-kit" || path=="/v1/account/instructions" || path=="/v1/corridors/batch" || path=="/v1/corridors/batch/preflight") || (path.starts_with("/v1/corridors/") && path.ends_with("/preflight")) || path=="/v1/diagnostics" || path=="/v1/governance/snapshot" || path=="/v1/governance/admin" || path=="/v1/governance/code" || path=="/v1/governance/release" || path=="/v1/network" || (path.starts_with("/v1/wallet/contracts/") || path.starts_with("/v1/wallet/recipient/") || path.starts_with("/v1/wallet/classic-recipient/")) || path.starts_with("/v1/transactions/") || path.starts_with("/v1/business/reviews/");
     if !costly || request.method()!=axum::http::Method::GET {
         return next.run(request).await;
     }
@@ -897,6 +897,50 @@ async fn observer_head(
         .map(Json).ok_or(StatusCode::NOT_FOUND)
 }
 
+/// Observe only pinned upstream Testnet artifacts; no customer account exists.
+async fn smart_account_kit(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let head = state.network().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| StatusCode::BAD_GATEWAY)?
+        .as_secs();
+    if !ledger_is_fresh(&head.ledger_closed_at_unix, now, 180) {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let keys =
+        crate::smart_account_kit::ledger_keys().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let reply = state
+        .rpc_with_params(
+            "getLedgerEntries",
+            Some(json!({
+             "keys":keys,"xdrFormat":"base64"
+            })),
+        )
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let observed_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| StatusCode::BAD_GATEWAY)?
+        .as_secs();
+    let observation = crate::smart_account_kit::assess(
+        &reply,
+        &head.passphrase,
+        head.ledger_sequence,
+        &head.ledger_closed_at_unix,
+        observed_at,
+    )
+    .map_err(|error| match error {
+        crate::smart_account_kit::ObserveError::Invalid => StatusCode::BAD_GATEWAY,
+        crate::smart_account_kit::ObserveError::Stale => StatusCode::SERVICE_UNAVAILABLE,
+    })?;
+    Ok((
+        [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
+        Json(observation),
+    ))
+}
+
 /// Recent *stored* public contract event IDs. Does not query live RPC, expose
 /// event XDR, infer private transfers or confirm settlement / fiat payout.
 /// Consent-triggered, bounded public Testnet contract-instance read.
@@ -1405,7 +1449,7 @@ async fn diagnostic_responses(request:Request<Body>,next:Next)->Response{
     response.headers_mut().insert("x-robots-tag",HeaderValue::from_static("noindex, nofollow, noarchive"));
     // A contract instance is a time-sensitive public ledger observation, not
     // stable account identity. Never let intermediaries reuse stale presence.
-    if path.starts_with("/v1/wallet/contracts/") || path.starts_with("/v1/wallet/recipient/") || path.starts_with("/v1/wallet/classic-recipient/") {
+    if path == "/v1/wallet/smart-account-kit" || path.starts_with("/v1/wallet/contracts/") || path.starts_with("/v1/wallet/recipient/") || path.starts_with("/v1/wallet/classic-recipient/") {
         response.headers_mut().insert(header::CACHE_CONTROL,HeaderValue::from_static("no-store"));
     }
     response
@@ -1536,6 +1580,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/observer",get(observer_head))
         .route("/v1/observer/activity",get(observer_activity))
         .route("/v1/observer/schema",get(observer_schema))
+        .route("/v1/wallet/smart-account-kit",get(smart_account_kit))
         .route("/v1/wallet/contracts/{address}",get(public_contract_instance))
         .route("/v1/wallet/recipient/{address}",get(public_recipient_presence))
         .route("/v1/wallet/classic-recipient/{address}",get(public_classic_recipient_presence))
@@ -1563,6 +1608,43 @@ pub fn router(state: AppState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn smart_account_kit_route_is_get_only_uncacheable_rate_limited_and_fails_closed() {
+        use tower::ServiceExt;
+        let mut state = AppState::without_db();
+        // An invalid URL fails before any socket or outbound request is made.
+        state.rpc_url = "invalid-url".to_owned();
+        state.rpc_rate_limit = Arc::new(Mutex::new(PublicReadLimiter::new(1)));
+        let app = router(state);
+        let request = || {
+            Request::builder()
+                .uri("/v1/wallet/smart-account-kit")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let response = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let body = to_bytes(response.into_body(), 65536).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert!(value.get("all_entries_healthy").is_none());
+        let limited = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(limited.headers()[header::CACHE_CONTROL], "no-store");
+        let post = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/wallet/smart-account-kit")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(post.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(post.headers()[header::CACHE_CONTROL], "no-store");
+    }
+
     #[test]
     fn corridor_batch_validates_exact_bounded_identifiers_and_never_executes() {
         let a = Uuid::new_v4();
@@ -2159,5 +2241,271 @@ mod tests {
     fn backpressure_and_response_budget_are_finite() {
         assert_eq!(MAX_IN_FLIGHT_RPC,16);
         assert_eq!(MAX_RPC_BODY_BYTES,2*1024*1024);
+    }
+
+    #[tokio::test]
+    async fn smart_account_kit_http_end_to_end_validates_with_sdk_and_fails_closed() {
+        use axum::routing::post as axum_post;
+        use sha2::{Digest, Sha256};
+        use std::sync::atomic::{AtomicU8, Ordering};
+        use stellar_xdr::{
+            BytesM, ContractCodeEntry, ContractCodeEntryExt, ContractDataDurability,
+            ContractDataEntry, ContractExecutable, ExtensionPoint, Hash, LedgerEntryData, Limits,
+            ScAddress, ScBytes, ScMap, ScVal, WriteXdr,
+        };
+
+        fn encode_b64(bytes: &[u8]) -> String {
+            const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            let mut out = String::new();
+            for chunk in bytes.chunks(3) {
+                let a = chunk[0];
+                let b = *chunk.get(1).unwrap_or(&0);
+                let c = *chunk.get(2).unwrap_or(&0);
+                out.push(A[(a >> 2) as usize] as char);
+                out.push(A[(((a & 3) << 4) | (b >> 4)) as usize] as char);
+                out.push(if chunk.len() > 1 {
+                    A[(((b & 15) << 2) | (c >> 6)) as usize] as char
+                } else {
+                    '='
+                });
+                out.push(if chunk.len() > 2 {
+                    A[(c & 63) as usize] as char
+                } else {
+                    '='
+                });
+            }
+            out
+        }
+
+        fn hash32(hex_str: &str) -> Hash {
+            let bytes = hex::decode(hex_str).unwrap();
+            Hash(bytes.try_into().unwrap())
+        }
+
+        fn decode_b64(s: &str) -> Vec<u8> {
+            crate::governance_code::decode_base64(s).unwrap()
+        }
+
+        let keys = crate::smart_account_kit::ledger_keys().unwrap();
+        assert_eq!(keys.len(), 7);
+        let ledger_seq: u32 = 5_000_000;
+        let now_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Synthetic ContractCode XDR (48,273 bytes; hash does not match the pinned release
+        // hash, so the real endpoint must classify it as mismatch rather than live).
+        let synthetic_wasm = vec![0x42u8; 48_273];
+        let synthetic_hash = Hash(Sha256::digest(&synthetic_wasm).into());
+        let account_code_xdr = LedgerEntryData::ContractCode(ContractCodeEntry {
+            ext: ContractCodeEntryExt::V0,
+            hash: synthetic_hash,
+            code: BytesM::try_from(synthetic_wasm).unwrap(),
+        })
+        .to_xdr(Limits::none())
+        .unwrap();
+
+        let make_instance_xdr = |ledger_key: &str, wasm_hex: &str| {
+            let key_bytes = decode_b64(ledger_key);
+            let contract_hash = Hash(key_bytes[8..40].try_into().unwrap());
+            LedgerEntryData::ContractData(ContractDataEntry {
+                ext: ExtensionPoint::V0,
+                contract: ScAddress::Contract(stellar_xdr::ContractId(contract_hash)),
+                key: ScVal::LedgerKeyContractInstance,
+                durability: ContractDataDurability::Persistent,
+                val: ScVal::ContractInstance(stellar_xdr::ScContractInstance {
+                    executable: ContractExecutable::Wasm(hash32(wasm_hex)),
+                    storage: Some(ScMap::default()),
+                }),
+            })
+            .to_xdr(Limits::none())
+            .unwrap()
+        };
+
+        let webauthn_xdr = make_instance_xdr(
+            &keys[1],
+            "e63a030d0f1a1481e36059a4837c433083b33e704c1f9625b7314795b6d72b76",
+        );
+        let threshold_xdr = make_instance_xdr(
+            &keys[3],
+            "f72a11de6e2d5d2495d98fe61e04cd13544e64156a5a3be83ef8c2e403d14a94",
+        );
+        let spending_xdr = make_instance_xdr(
+            &keys[5],
+            "9bc17db0a804d6c82231a268c43bac1413650ea92cac0022e0d0a3b66ddc8189",
+        );
+        let _ = std::marker::PhantomData::<ScBytes>;
+
+        let mode = Arc::new(AtomicU8::new(0));
+        let rpc_mode = Arc::clone(&mode);
+        let expected_keys = keys.clone();
+        let rpc_entries = vec![
+            json!({
+                "key": keys[0],
+                "xdr": encode_b64(&account_code_xdr),
+                "lastModifiedLedgerSeq": ledger_seq - 10,
+                "liveUntilLedgerSeq": ledger_seq + 200_000
+            }),
+            json!({
+                "key": keys[1],
+                "xdr": encode_b64(&webauthn_xdr),
+                "lastModifiedLedgerSeq": ledger_seq - 10,
+                "liveUntilLedgerSeq": ledger_seq + 200_000
+            }),
+            json!({
+                "key": keys[3],
+                "xdr": encode_b64(&threshold_xdr),
+                "lastModifiedLedgerSeq": ledger_seq - 10,
+                "liveUntilLedgerSeq": ledger_seq + 100
+            }),
+            json!({
+                "key": keys[5],
+                "xdr": encode_b64(&spending_xdr),
+                "lastModifiedLedgerSeq": ledger_seq - 10,
+                "liveUntilLedgerSeq": ledger_seq + 200_000
+            }),
+        ];
+
+        let rpc_app = Router::new().route(
+            "/",
+            axum_post(move |Json(req): Json<Value>| {
+                let rpc_mode = Arc::clone(&rpc_mode);
+                let expected_keys = expected_keys.clone();
+                let rpc_entries = rpc_entries.clone();
+                async move {
+                    let current = rpc_mode.load(Ordering::SeqCst);
+                    let method = req["method"].as_str().unwrap_or("");
+                    let result = match method {
+                        "getNetwork" => json!({
+                            "passphrase": if current == 2 {
+                                "Public Global Stellar Network ; September 2015"
+                            } else {
+                                TESTNET_PASSPHRASE
+                            },
+                            "protocolVersion": 23
+                        }),
+                        "getLatestLedger" => json!({
+                            "id": "ab".repeat(32),
+                            "protocolVersion": 23,
+                            "sequence": ledger_seq,
+                            "closeTime": if current == 1 {
+                                (now_unix - 300).to_string()
+                            } else {
+                                (now_unix - 5).to_string()
+                            }
+                        }),
+                        "getLedgerEntries" => {
+                            assert_eq!(req["params"]["xdrFormat"], "base64");
+                            let req_keys: Vec<String> = req["params"]["keys"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .map(|v| v.as_str().unwrap().to_owned())
+                                .collect();
+                            assert_eq!(req_keys, expected_keys);
+                            json!({
+                                "latestLedger": ledger_seq,
+                                "entries": rpc_entries
+                            })
+                        }
+                        other => panic!("unexpected RPC method {other}"),
+                    };
+                    Json(json!({
+                        "jsonrpc": "2.0",
+                        "id": "stealthbridge-observer",
+                        "result": result
+                    }))
+                }
+            }),
+        );
+
+        let rpc_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let rpc_addr = rpc_listener.local_addr().unwrap();
+        let rpc_task = tokio::spawn(async move { axum::serve(rpc_listener, rpc_app).await.unwrap() });
+
+        let mut state = AppState::without_db();
+        state.rpc_url = format!("http://{rpc_addr}");
+        let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_addr = api_listener.local_addr().unwrap();
+        let api_task = tokio::spawn(async move {
+            axum::serve(api_listener, router(state)).await.unwrap();
+        });
+
+        let client = reqwest::Client::new();
+        let url = format!("http://{api_addr}/v1/wallet/smart-account-kit");
+        let resp = client.get(&url).send().await.unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-store");
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["schema_version"], 1);
+        assert_eq!(body["network"], "testnet");
+        assert_eq!(body["all_entries_healthy"], false);
+        assert_eq!(body["entries"][0]["status"], "mismatch");
+        assert_eq!(body["entries"][1]["status"], "live");
+        assert_eq!(body["entries"][2]["status"], "unavailable");
+        assert_eq!(body["entries"][3]["status"], "low_ttl");
+        assert_eq!(body["entries"][3]["ttl_remaining_ledgers"], 100);
+        assert_eq!(body["entries"][4]["status"], "unavailable");
+        assert_eq!(body["entries"][5]["status"], "live");
+        assert_eq!(body["entries"][6]["status"], "unavailable");
+        for flag in [
+            "customer_smart_account_factory_deployed",
+            "customer_smart_account_created",
+            "credential_recovery_verified",
+            "privacy_proofs_verified",
+            "mainnet_enabled",
+            "financial_execution_enabled",
+        ] {
+            assert_eq!(body[flag], false);
+        }
+        assert_eq!(body["operator_managed_deployment"], true);
+
+        if let Ok(entry) = std::env::var("STEALTHBRIDGE_SDK_ENTRY") {
+            use std::{
+                io::Write,
+                process::{Command, Stdio},
+            };
+            let mut child = Command::new("node")
+                .args([
+                    "--input-type=module",
+                    "-e",
+                    r#"
+                        import {readFileSync} from 'node:fs';
+                        import {pathToFileURL} from 'node:url';
+                        import assert from 'node:assert/strict';
+                        const {validSmartAccountKitSnapshot}=await import(pathToFileURL(process.env.STEALTHBRIDGE_SDK_ENTRY).href);
+                        const data=JSON.parse(readFileSync(0,'utf8'));
+                        assert.equal(validSmartAccountKitSnapshot(data),true);
+                        console.log('Verified real HTTP smart-account-kit response with built SDK');
+                    "#,
+                ])
+                .env("STEALTHBRIDGE_SDK_ENTRY", entry)
+                .stdin(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(&serde_json::to_vec(&body).unwrap())
+                .unwrap();
+            assert!(child.wait().unwrap().success());
+        }
+
+        // Stale ledger head must fail closed with 503 and no-store.
+        mode.store(1, Ordering::SeqCst);
+        let stale = client.get(&url).send().await.unwrap();
+        assert_eq!(stale.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(stale.headers()[header::CACHE_CONTROL], "no-store");
+
+        // Non-Testnet network must fail closed with 502 and no-store.
+        mode.store(2, Ordering::SeqCst);
+        let wrong_net = client.get(&url).send().await.unwrap();
+        assert_eq!(wrong_net.status(), reqwest::StatusCode::BAD_GATEWAY);
+        assert_eq!(wrong_net.headers()[header::CACHE_CONTROL], "no-store");
+
+        api_task.abort();
+        rpc_task.abort();
     }
 }
