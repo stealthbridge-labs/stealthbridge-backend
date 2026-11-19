@@ -42,11 +42,11 @@ def check(backend_openapi,backend_router,sdk_logic,frontend_logic,workspace,prox
         require(re.search(r"(?m)^  "+re.escape(entry)+r":\s*$",backend_openapi) is not None,
                 "Missing public OpenAPI route "+entry)
         require(re.search(r"(?m)^\s+\.route\(\""+re.escape(entry)+
-                          r"\",get\([a-z_]+\)\)",backend_router) is not None,
+                          r"\",\s*get\([a-z_]+\)\)",backend_router) is not None,
                 "Missing GET-only backend route "+entry)
         require(f'\"{path}\"' in proxy or path=="ready" and '\"ready\"' in proxy,
                 "Preview proxy must explicitly allow "+entry)
-    require(re.search(r'\.route\("/v1/settlements",post\(disabled\)\)',backend_router) is not None,
+    require(re.search(r'\.route\("/v1/settlements",\s*post\(disabled\)\)',backend_router) is not None,
             "Settlement write route must remain disabled")
     require("export async function GET" in proxy and
             "export async function POST" not in proxy and

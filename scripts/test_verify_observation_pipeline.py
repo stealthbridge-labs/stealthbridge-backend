@@ -1,3 +1,4 @@
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -30,16 +31,18 @@ class ObservabilityContractTests(unittest.TestCase):
     with self.assertRaisesRegex(ValueError,"differs from reviewed SDK"):
       check(API,ROUTER,SDK,SDK+"//changed",CLIENT,PROXY)
  def test_missing_or_mutable_backend_read_endpoint_is_blocked(self):
-    altered=ROUTER.replace('.route("/v1/observer",get(observer_head))',
-      '.route("/v1/observer",post(observer_head))')
+    altered=re.sub(r'\.route\("/v1/observer",\s*get\(observer_head\)\)',
+      '.route("/v1/observer", post(observer_head))',ROUTER)
+    self.assertNotEqual(altered,ROUTER)
     with self.assertRaisesRegex(ValueError,"GET-only"):
       check(API,altered,SDK,SDK,CLIENT,PROXY)
  def test_unauthorized_proxy_write_endpoint_is_blocked(self):
     with self.assertRaisesRegex(ValueError,"write methods"):
       check(API,ROUTER,SDK,SDK,CLIENT,PROXY+'\nexport async function POST() {}')
  def test_settlement_post_cannot_be_enabled(self):
-    altered=ROUTER.replace('.route("/v1/settlements",post(disabled))',
-      '.route("/v1/settlements",post(submit_payment))')
+    altered=re.sub(r'\.route\("/v1/settlements",\s*post\(disabled\)\)',
+      '.route("/v1/settlements", post(submit_payment))',ROUTER)
+    self.assertNotEqual(altered,ROUTER)
     with self.assertRaisesRegex(ValueError,"must remain disabled"):
       check(API,altered,SDK,SDK,CLIENT,PROXY)
  def test_missing_hash_verification_is_blocked(self):

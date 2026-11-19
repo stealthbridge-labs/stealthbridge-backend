@@ -106,6 +106,13 @@ Reliable ledger observer operations and retention, exact provider evidence and r
 
 **Infrastructure readiness ≠ financial authorization. No customer funds.**
 
+## Protocol 30, privacy metadata, and controlled Testnet lifecycle (Milestones 3–6)
+
+- **Protocol 30 & CAP-84 StrKeys:** Recipient presence and address decoders validate `G...`, `M...`, `C...`, and CAP-84 `W...` muxed addresses without permissive regex fallbacks.
+- **Privacy Rail Registry (`src/privacy_rails.rs`):** Read-only metadata & capability gating for `private-payments` and `confidential-token`, keeping `privacy_verified = false` until independent proof verification and issuer approvals exist.
+- **Controlled Testnet Settlement Lifecycle (`src/settlement_lifecycle.rs`, migration `202611190001`):** Explicit PostgreSQL/SQLx state machine (`quote_unavailable`, `policy_verified`, `customer_authorized`, `privacy_proof_verified`, `tx_submitted`, `chain_finalized`, `reconciled`) separating Testnet finality from off-chain fiat payouts (`fiat_payouts_enabled = false`, `live_fx_enabled = false`, `mainnet_enabled = false`).
+- **Release Readiness:** See the consolidated cross-repo assessment in [`stealthbridge-contracts/docs/MILESTONE-6-RELEASE-READINESS-REPORT.md`](https://github.com/stealthbridge-labs/stealthbridge-contracts/blob/main/docs/MILESTONE-6-RELEASE-READINESS-REPORT.md).
+
 ## Open source
 
 StealthBridge is available under the [MIT license](LICENSE). Third-party dependencies retain their own licenses. Contributions should include meaningful tests and preserve customer privacy and disabled financial execution gates.
