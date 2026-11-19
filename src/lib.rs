@@ -1,4 +1,5 @@
 pub mod settlement;
+pub mod settlement_lifecycle;
 pub mod server;
 pub mod store;
 pub mod transaction;
@@ -26,6 +27,7 @@ pub mod governance_code;
 pub mod governance_admin;
 pub mod governance_consistency;
 pub mod privacy_commitment;
+pub mod privacy_rails;
 pub mod customer_ciphertext_vault;
 
 pub mod payment_instructions;

@@ -12,7 +12,7 @@ SCHEMA_RE=re.compile(r"const REQUIRED_SCHEMA_VERSIONS: \[i64; (\d+)\] = \[([\s\S
 # The private draft vault is opt-in and is not part of the existing
 # production readiness contract until the protected migration is applied.
 # Do not block unrelated network and catalog reads on an unreleased vault.
-OPTIONAL_MIGRATIONS=(202611040001,202611120001)
+OPTIONAL_MIGRATIONS=(202611040001,202611120001,202611190001)
 ADDITIVE_ONLY=(202610130001,202610130002,202610150001,202610210001,202610270001,*OPTIONAL_MIGRATIONS)
 REQUIRED_TABLES=(
     "organization_invitations",
@@ -53,6 +53,11 @@ def validate_sources(files,server):
                          "PRIMARY KEY(account_address,id)", "nonce UUID PRIMARY KEY", "octet_length(envelope::text)<=4096",
                          "expires_at_unix-created_at_unix BETWEEN 300 AND 86400"):
                 require(item in source, f"payment instruction migration missing bound: {item}")
+        if version == 202611190001:
+            for item in ("account_settlement_lifecycles", "account_settlement_events", "account_settlement_outbox", "account_settlement_receipts",
+                         "PRIMARY KEY(account_address,id)", "UNIQUE(account_address,idempotency_key)", "nonce UUID PRIMARY KEY",
+                         "expires_at_unix - created_at_unix BETWEEN 300 AND 86400"):
+                require(item in source, f"settlement lifecycle migration missing bound: {item}")
         if version in ADDITIVE_ONLY:
             require("CREATE TABLE IF NOT EXISTS" in source,
                     f"additive migration {version} must create tables safely")

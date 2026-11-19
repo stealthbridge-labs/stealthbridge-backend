@@ -54,6 +54,64 @@ pub fn decode_account_address(address: &str) -> Option<[u8; 32]> {
     Some(key)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StellarAddress {
+    Classic([u8; 32]),
+    Contract([u8; 32]),
+    MuxedClassic { ed25519: [u8; 32], id: u64 },
+    MuxedContract { contract: [u8; 32], id: u64 },
+}
+
+/// Official `stellar-strkey` CAP-84 / SEP-23 parser for canonical uppercase `G`, `C`, `M`, `W` strings.
+pub fn parse_canonical_stellar_address(address: &str) -> Option<StellarAddress> {
+    if address.len() > 69
+        || !address
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || (b'2'..=b'7').contains(&b))
+    {
+        return None;
+    }
+    match stellar_strkey::Strkey::from_string(address).ok()? {
+        stellar_strkey::Strkey::PublicKeyEd25519(k) => Some(StellarAddress::Classic(k.0)),
+        stellar_strkey::Strkey::Contract(c) => Some(StellarAddress::Contract(c.0)),
+        stellar_strkey::Strkey::MuxedAccountEd25519(m) => Some(StellarAddress::MuxedClassic {
+            ed25519: m.ed25519,
+            id: m.id,
+        }),
+        stellar_strkey::Strkey::MuxedContract(w) => Some(StellarAddress::MuxedContract {
+            contract: w.contract_id,
+            id: w.id,
+        }),
+        _ => None,
+    }
+}
+
+/// Canonical `G...` lookup target for classic `G` or muxed `M` recipient presence checks.
+pub fn resolve_classic_recipient_account(address: &str) -> Option<String> {
+    match parse_canonical_stellar_address(address)? {
+        StellarAddress::Classic(k) | StellarAddress::MuxedClassic { ed25519: k, .. } => Some(
+            stellar_strkey::Strkey::PublicKeyEd25519(stellar_strkey::ed25519::PublicKey(k))
+                .to_string()
+                .as_str()
+                .to_owned(),
+        ),
+        _ => None,
+    }
+}
+
+/// Canonical `C...` lookup target for Soroban `C` or CAP-84 muxed `W` recipient presence checks.
+pub fn resolve_contract_recipient(address: &str) -> Option<String> {
+    match parse_canonical_stellar_address(address)? {
+        StellarAddress::Contract(c) | StellarAddress::MuxedContract { contract: c, .. } => Some(
+            stellar_strkey::Strkey::Contract(stellar_strkey::Contract(c))
+                .to_string()
+                .as_str()
+                .to_owned(),
+        ),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

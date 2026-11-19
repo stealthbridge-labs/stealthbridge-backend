@@ -74,15 +74,15 @@ paths:
   /v1/wallet/classic-recipient/{address}:
     get:
       operationId: classicRecipientPresence
-      summary: Testnet Horizon classic-account presence without balance, ownership or asset claims
+      summary: Testnet Horizon classic-account presence (G or M underlying G) without balance, mux ID, ownership or asset claims
       parameters:
         - name: address
           in: path
           required: true
-          schema: {type: string, minLength: 56, maxLength: 56}
+          schema: {type: string, minLength: 56, maxLength: 69}
       responses:
         "200":
-          description: Verified Testnet G-account lookup; no trustline, financial or identity claims
+          description: Verified Testnet G/M-account lookup; no trustline, mux routing, financial or identity claims
           content:
             application/json:
               schema: {$ref: "#/components/schemas/ClassicRecipientPresence"}
@@ -91,12 +91,12 @@ paths:
   /v1/wallet/recipient/{address}:
     get:
       operationId: recipientPresence
-      summary: Public recipient contract presence without code or signer details
+      summary: Public recipient contract presence (C or CAP-84 W underlying C) without code, mux ID or signer details
       parameters:
         - name: address
           in: path
           required: true
-          schema: {type: string, minLength: 56, maxLength: 56}
+          schema: {type: string, minLength: 56, maxLength: 69}
       responses:
         "200":
           description: Fresh presence-only observation; no authorization or financial guarantees
@@ -678,7 +678,7 @@ components:
         schema_version: {type: integer, const: 1}
         network: {type: string, const: testnet}
         source: {type: string, const: stellar-horizon/account-presence}
-        address: {type: string, minLength: 56, maxLength: 56}
+        address: {type: string, minLength: 56, maxLength: 69}
         observed_at_unix: {type: integer, minimum: 1}
         classic_account_found: {type: boolean}
         ownership_verified: {type: boolean, const: false}
@@ -692,7 +692,7 @@ components:
         schema_version: {type: integer, const: 1}
         network: {type: string, const: testnet}
         source: {type: string, const: stellar-rpc/recipient-presence}
-        address: {type: string, minLength: 56, maxLength: 56}
+        address: {type: string, minLength: 56, maxLength: 69}
         observed_at_unix: {type: integer, minimum: 1}
         observed_ledger_sequence: {type: integer, minimum: 1}
         contract_instance_found: {type: boolean}

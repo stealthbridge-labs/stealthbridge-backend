@@ -1,21 +1,35 @@
+use crate::ledger::{self, LedgerCheckpoint, VerifiedHead};
+use crate::ledger_events;
+use crate::transaction::{self, TransactionObservation};
+use crate::{authz::Permission, business_reviews, org_auth};
+use axum::extract::ConnectInfo;
 use axum::{
-    body::{to_bytes,Body},
-    extract::{Path, Query, State}, http::{header,HeaderMap,HeaderValue,Request,StatusCode},
-    middleware::{from_fn,from_fn_with_state,Next}, response::{IntoResponse,Response}, routing::{get, post}, Json, Router,
+    body::{to_bytes, Body},
+    extract::{Path, Query, State},
+    http::{header, HeaderMap, HeaderValue, Request, StatusCode},
+    middleware::{from_fn, from_fn_with_state, Next},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, FromRow, PgPool};
-use std::{collections::HashMap, env, error::Error, net::{IpAddr,SocketAddr}, sync::{atomic::{AtomicBool,AtomicU64,Ordering},Arc,Mutex}, time::{Duration,Instant,SystemTime,UNIX_EPOCH}};
+use std::{
+    collections::HashMap,
+    env,
+    error::Error,
+    net::{IpAddr, SocketAddr},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 use tokio::sync::Semaphore;
-use axum::extract::ConnectInfo;
 use tracing::warn;
 use uuid::Uuid;
-use crate::transaction::{self,TransactionObservation};
-use crate::ledger::{self, VerifiedHead, LedgerCheckpoint};
-use crate::ledger_events;
-use crate::{authz::Permission, business_reviews, org_auth};
 
 /// The only network accepted until privacy, compliance and security gates are satisfied.
 const TESTNET_PASSPHRASE: &str = "Test SDF Network ; September 2015";
@@ -31,77 +45,118 @@ const RATE_WINDOW: Duration = Duration::from_secs(60);
 /// Never trust user-submitted forwarding headers as an identity source.
 /// Vercel Functions lack a socket peer; fall back to one shared per-instance
 /// anonymous bucket. Deploy a trusted edge limiter for globally fair quotas.
-struct RateWindow { started: Instant, count: u32 }
+struct RateWindow {
+    started: Instant,
+    count: u32,
+}
 impl RateWindow {
-    fn new(now: Instant) -> Self { Self {started:now,count:0} }
-    fn take(&mut self, now:Instant, maximum:u32)->bool {
-        if now.duration_since(self.started)>=RATE_WINDOW {
-            self.started=now;
-            self.count=0;
+    fn new(now: Instant) -> Self {
+        Self {
+            started: now,
+            count: 0,
         }
-        if self.count>=maximum{return false;}
-        self.count+=1;
+    }
+    fn take(&mut self, now: Instant, maximum: u32) -> bool {
+        if now.duration_since(self.started) >= RATE_WINDOW {
+            self.started = now;
+            self.count = 0;
+        }
+        if self.count >= maximum {
+            return false;
+        }
+        self.count += 1;
         true
     }
 }
 struct PublicReadLimiter {
-    maximum:u32,
-    peers:HashMap<IpAddr,RateWindow>,
-    anonymous:RateWindow,
+    maximum: u32,
+    peers: HashMap<IpAddr, RateWindow>,
+    anonymous: RateWindow,
 }
 impl PublicReadLimiter {
-    fn new(maximum:u32)->Self {
-        Self {maximum,peers:HashMap::new(),anonymous:RateWindow::new(Instant::now())}
+    fn new(maximum: u32) -> Self {
+        Self {
+            maximum,
+            peers: HashMap::new(),
+            anonymous: RateWindow::new(Instant::now()),
+        }
     }
-    fn admit(&mut self,client:Option<IpAddr>,now:Instant)->bool {
-        if let Some(ip)=client {
-            if !self.peers.contains_key(&ip) && self.peers.len()>=MAX_RATE_LIMIT_BUCKETS {
-                self.peers.retain(|_,bucket|now.duration_since(bucket.started)<RATE_WINDOW);
-                if self.peers.len()>=MAX_RATE_LIMIT_BUCKETS {
+    fn admit(&mut self, client: Option<IpAddr>, now: Instant) -> bool {
+        if let Some(ip) = client {
+            if !self.peers.contains_key(&ip) && self.peers.len() >= MAX_RATE_LIMIT_BUCKETS {
+                self.peers
+                    .retain(|_, bucket| now.duration_since(bucket.started) < RATE_WINDOW);
+                if self.peers.len() >= MAX_RATE_LIMIT_BUCKETS {
                     // Bounded memory, never bypass the quota on table exhaustion.
-                    return self.anonymous.take(now,self.maximum);
+                    return self.anonymous.take(now, self.maximum);
                 }
             }
-            return self.peers.entry(ip).or_insert_with(||RateWindow::new(now)).take(now,self.maximum);
+            return self
+                .peers
+                .entry(ip)
+                .or_insert_with(|| RateWindow::new(now))
+                .take(now, self.maximum);
         }
-        self.anonymous.take(now,self.maximum)
+        self.anonymous.take(now, self.maximum)
     }
 }
-fn configured_read_limit()->Result<u32,Box<dyn Error>>{
-    let configured=env::var("STEALTHBRIDGE_RPC_READS_PER_MINUTE")
-        .unwrap_or_else(|_|DEFAULT_RPC_READS_PER_MINUTE.to_string());
-    let value:u32=configured.parse()
-        .map_err(|_|"STEALTHBRIDGE_RPC_READS_PER_MINUTE must be an integer from 1 through 120")?;
-    if !(1..=MAX_RPC_READS_PER_MINUTE).contains(&value){
+fn configured_read_limit() -> Result<u32, Box<dyn Error>> {
+    let configured = env::var("STEALTHBRIDGE_RPC_READS_PER_MINUTE")
+        .unwrap_or_else(|_| DEFAULT_RPC_READS_PER_MINUTE.to_string());
+    let value: u32 = configured
+        .parse()
+        .map_err(|_| "STEALTHBRIDGE_RPC_READS_PER_MINUTE must be an integer from 1 through 120")?;
+    if !(1..=MAX_RPC_READS_PER_MINUTE).contains(&value) {
         return Err("STEALTHBRIDGE_RPC_READS_PER_MINUTE must be between 1 and 120".into());
     }
     Ok(value)
 }
 async fn limit_public_rpc_reads(
-    State(state):State<Arc<AppState>>,
-    request:Request<Body>,
-    next:Next,
-)->Response {
-    let path=request.uri().path();
-    let costly=(path=="/v1/wallet/smart-account-kit" || path=="/v1/account/instructions" || path=="/v1/corridors/batch" || path=="/v1/corridors/batch/preflight") || (path.starts_with("/v1/corridors/") && path.ends_with("/preflight")) || path=="/v1/diagnostics" || path=="/v1/governance/snapshot" || path=="/v1/governance/admin" || path=="/v1/governance/code" || path=="/v1/governance/release" || path=="/v1/network" || (path.starts_with("/v1/wallet/contracts/") || path.starts_with("/v1/wallet/recipient/") || path.starts_with("/v1/wallet/classic-recipient/")) || path.starts_with("/v1/transactions/") || path.starts_with("/v1/business/reviews/");
-    if !costly || request.method()!=axum::http::Method::GET {
+    State(state): State<Arc<AppState>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let path = request.uri().path();
+    let costly = (path == "/v1/wallet/smart-account-kit"
+        || path == "/v1/account/instructions"
+        || path == "/v1/corridors/batch"
+        || path == "/v1/corridors/batch/preflight")
+        || (path.starts_with("/v1/corridors/") && path.ends_with("/preflight"))
+        || path == "/v1/diagnostics"
+        || path == "/v1/governance/snapshot"
+        || path == "/v1/governance/admin"
+        || path == "/v1/governance/code"
+        || path == "/v1/governance/release"
+        || path == "/v1/network"
+        || (path.starts_with("/v1/wallet/contracts/")
+            || path.starts_with("/v1/wallet/recipient/")
+            || path.starts_with("/v1/wallet/classic-recipient/"))
+        || path.starts_with("/v1/transactions/")
+        || path.starts_with("/v1/business/reviews/");
+    if !costly || request.method() != axum::http::Method::GET {
         return next.run(request).await;
     }
     // Do not parse X-Forwarded-For, CF-Connecting-IP or caller-supplied keys.
-    let peer=request.extensions().get::<ConnectInfo<SocketAddr>>().map(|value|value.0.ip());
-    let permitted={
-        let mut guard=state.rpc_rate_limit.lock()
-            .unwrap_or_else(|poisoned|poisoned.into_inner());
-        guard.admit(peer,Instant::now())
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|value| value.0.ip());
+    let permitted = {
+        let mut guard = state
+            .rpc_rate_limit
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.admit(peer, Instant::now())
     };
     if !permitted {
-        let mut response=StatusCode::TOO_MANY_REQUESTS.into_response();
-        response.headers_mut().insert(header::RETRY_AFTER,HeaderValue::from_static("60"));
+        let mut response = StatusCode::TOO_MANY_REQUESTS.into_response();
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
         return response;
     }
     next.run(request).await
 }
-
 
 /// Refuse accidental plaintext PostgreSQL credentials over remote networks.
 /// Loopback Postgres remains available for isolated local CI and development.
@@ -109,17 +164,23 @@ fn validate_database_transport(database_url: &str) -> Result<(), Box<dyn Error>>
     let url = reqwest::Url::parse(database_url)
         .map_err(|_| "DATABASE_URL must be a valid PostgreSQL URL")?;
     if !["postgres", "postgresql"].contains(&url.scheme())
-        || url.username().is_empty() || url.password().is_none()
+        || url.username().is_empty()
+        || url.password().is_none()
     {
         return Err("DATABASE_URL must be a PostgreSQL connection URL with credentials".into());
     }
-    let host = url.host_str().ok_or("DATABASE_URL must include a database host")?;
+    let host = url
+        .host_str()
+        .ok_or("DATABASE_URL must include a database host")?;
     let local = ["localhost", "127.0.0.1", "[::1]", "::1"].contains(&host);
     if !local {
-        let modes: Vec<String> = url.query_pairs()
+        let modes: Vec<String> = url
+            .query_pairs()
             .filter(|(key, _)| key == "sslmode")
-            .map(|(_, value)| value.into_owned()).collect();
-        if modes.len() != 1 || !["require", "verify-ca", "verify-full"].contains(&modes[0].as_str()) {
+            .map(|(_, value)| value.into_owned())
+            .collect();
+        if modes.len() != 1 || !["require", "verify-ca", "verify-full"].contains(&modes[0].as_str())
+        {
             return Err("Remote PostgreSQL requires exactly one secure sslmode".into());
         }
     }
@@ -141,27 +202,32 @@ pub struct AppState {
     pub(crate) db: Option<PgPool>,
     rpc_permits: Arc<Semaphore>,
     rpc_rate_limit: Arc<Mutex<PublicReadLimiter>>,
-    metrics_token:Option<String>,
-    session_domain:Option<String>,
-    session_secret:Option<Arc<Vec<u8>>>,
-    pub(crate) account_bridge_secret:Option<Arc<Vec<u8>>>,
-    pub(crate) team_invites_enabled:bool,
-    metrics:Arc<ReadinessMetrics>,
+    metrics_token: Option<String>,
+    session_domain: Option<String>,
+    session_secret: Option<Arc<Vec<u8>>>,
+    pub(crate) account_bridge_secret: Option<Arc<Vec<u8>>>,
+    pub(crate) team_invites_enabled: bool,
+    metrics: Arc<ReadinessMetrics>,
 }
 
 struct ReadinessMetrics {
-    rpc_probes_total:AtomicU64,
-    rpc_probe_errors_total:AtomicU64,
-    rpc_probe_latency_ms_sum:AtomicU64,
-    ledger_age_seconds:AtomicU64,
-    database_configured:AtomicBool,
-    database_available:AtomicBool,
+    rpc_probes_total: AtomicU64,
+    rpc_probe_errors_total: AtomicU64,
+    rpc_probe_latency_ms_sum: AtomicU64,
+    ledger_age_seconds: AtomicU64,
+    database_configured: AtomicBool,
+    database_available: AtomicBool,
 }
 impl Default for ReadinessMetrics {
-    fn default()->Self {
-        Self {rpc_probes_total:AtomicU64::new(0),rpc_probe_errors_total:AtomicU64::new(0),
-            rpc_probe_latency_ms_sum:AtomicU64::new(0),ledger_age_seconds:AtomicU64::new(u64::MAX),
-            database_configured:AtomicBool::new(false),database_available:AtomicBool::new(false)}
+    fn default() -> Self {
+        Self {
+            rpc_probes_total: AtomicU64::new(0),
+            rpc_probe_errors_total: AtomicU64::new(0),
+            rpc_probe_latency_ms_sum: AtomicU64::new(0),
+            ledger_age_seconds: AtomicU64::new(u64::MAX),
+            database_configured: AtomicBool::new(false),
+            database_available: AtomicBool::new(false),
+        }
     }
 }
 
@@ -170,9 +236,15 @@ impl AppState {
         let rpc_url = env::var("STELLAR_RPC_URL")
             .unwrap_or_else(|_| "https://soroban-testnet.stellar.org".to_owned());
         let url = reqwest::Url::parse(&rpc_url)?;
-        if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some()
-            || url.query().is_some() || url.fragment().is_some() {
-            return Err("STELLAR_RPC_URL must be HTTPS with no credentials, query or fragment".into());
+        if url.scheme() != "https"
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(
+                "STELLAR_RPC_URL must be HTTPS with no credentials, query or fragment".into(),
+            );
         }
         let http = rpc_http_client()?;
         let db = match env::var("DATABASE_URL") {
@@ -181,40 +253,66 @@ impl AppState {
                 // Keep liveness independent from database reachability; /ready
                 // reports failed connections with a bounded query timeout.
                 validate_database_transport(&database_url)?;
-                Some(PgPoolOptions::new()
-                    // Vercel may start multiple function instances: bound each pool to
-                    // avoid exhausting a managed PostgreSQL connection budget.
-                    .min_connections(0)
-                    .max_connections(2)
-                    .acquire_timeout(Duration::from_secs(3))
-                    .idle_timeout(Duration::from_secs(60))
-                    .connect_lazy(&database_url)?)
+                Some(
+                    PgPoolOptions::new()
+                        // Vercel may start multiple function instances: bound each pool to
+                        // avoid exhausting a managed PostgreSQL connection budget.
+                        .min_connections(0)
+                        .max_connections(2)
+                        .acquire_timeout(Duration::from_secs(3))
+                        .idle_timeout(Duration::from_secs(60))
+                        .connect_lazy(&database_url)?,
+                )
             }
             _ => None,
         };
-        let metrics_token=env::var("STEALTHBRIDGE_METRICS_TOKEN").ok().filter(|value|!value.is_empty());
+        let metrics_token = env::var("STEALTHBRIDGE_METRICS_TOKEN")
+            .ok()
+            .filter(|value| !value.is_empty());
         // Authenticated reads are strictly opt-in. A partial or weak server-side
         // auth configuration must fail startup instead of silently falling back.
-        let session_domain=env::var("STEALTHBRIDGE_AUTH_DOMAIN").ok().filter(|s|!s.is_empty());
-        let session_secret=env::var("STEALTHBRIDGE_SESSION_SECRET").ok().filter(|s|!s.is_empty());
-        if session_domain.is_some()!=session_secret.is_some()
-            || session_secret.as_ref().is_some_and(|s|s.len()<32)
-            || session_domain.as_ref().is_some_and(|s|s.len()>253 || !s.contains('.')
-                || !s.bytes().all(|b|b.is_ascii_lowercase() || b.is_ascii_digit() || b==b'.' || b==b'-'))
+        let session_domain = env::var("STEALTHBRIDGE_AUTH_DOMAIN")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let session_secret = env::var("STEALTHBRIDGE_SESSION_SECRET")
+            .ok()
+            .filter(|s| !s.is_empty());
+        if session_domain.is_some() != session_secret.is_some()
+            || session_secret.as_ref().is_some_and(|s| s.len() < 32)
+            || session_domain.as_ref().is_some_and(|s| {
+                s.len() > 253
+                    || !s.contains('.')
+                    || !s.bytes().all(|b| {
+                        b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-'
+                    })
+            })
         {
-            return Err("Trusted review auth requires domain and secret (>=32 bytes) together".into());
+            return Err(
+                "Trusted review auth requires domain and secret (>=32 bytes) together".into(),
+            );
         }
-        let account_bridge_secret=env::var("STEALTHBRIDGE_ACCOUNT_BRIDGE_SECRET")
-            .ok().filter(|s|!s.is_empty());
-        if account_bridge_secret.as_ref().is_some_and(|s|s.len()<32){
+        let account_bridge_secret = env::var("STEALTHBRIDGE_ACCOUNT_BRIDGE_SECRET")
+            .ok()
+            .filter(|s| !s.is_empty());
+        if account_bridge_secret.as_ref().is_some_and(|s| s.len() < 32) {
             return Err("STEALTHBRIDGE_ACCOUNT_BRIDGE_SECRET must be >=32 bytes".into());
         }
-        Ok(Self {http,rpc_url,db,rpc_permits:Arc::new(Semaphore::new(MAX_IN_FLIGHT_RPC)),
-            rpc_rate_limit:Arc::new(Mutex::new(PublicReadLimiter::new(configured_read_limit()?))),
-            metrics_token,session_domain,session_secret:session_secret.map(|s|Arc::new(s.into_bytes())),
-            account_bridge_secret:account_bridge_secret.map(|s|Arc::new(s.into_bytes())),
-            team_invites_enabled:env::var("STEALTHBRIDGE_TEAM_INVITES_ENABLED").ok().as_deref()==Some("true"),
-            metrics:Arc::new(ReadinessMetrics::default())})
+        Ok(Self {
+            http,
+            rpc_url,
+            db,
+            rpc_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT_RPC)),
+            rpc_rate_limit: Arc::new(Mutex::new(PublicReadLimiter::new(configured_read_limit()?))),
+            metrics_token,
+            session_domain,
+            session_secret: session_secret.map(|s| Arc::new(s.into_bytes())),
+            account_bridge_secret: account_bridge_secret.map(|s| Arc::new(s.into_bytes())),
+            team_invites_enabled: env::var("STEALTHBRIDGE_TEAM_INVITES_ENABLED")
+                .ok()
+                .as_deref()
+                == Some("true"),
+            metrics: Arc::new(ReadinessMetrics::default()),
+        })
     }
 
     #[cfg(test)]
@@ -224,34 +322,49 @@ impl AppState {
             rpc_url: "https://soroban-testnet.stellar.org".to_owned(),
             db: None,
             rpc_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT_RPC)),
-            rpc_rate_limit: Arc::new(Mutex::new(PublicReadLimiter::new(DEFAULT_RPC_READS_PER_MINUTE))),
-            metrics_token:None,
-            session_domain:None, session_secret:None, account_bridge_secret:None,
-            team_invites_enabled:false,
-            metrics:Arc::new(ReadinessMetrics::default()),
+            rpc_rate_limit: Arc::new(Mutex::new(PublicReadLimiter::new(
+                DEFAULT_RPC_READS_PER_MINUTE,
+            ))),
+            metrics_token: None,
+            session_domain: None,
+            session_secret: None,
+            account_bridge_secret: None,
+            team_invites_enabled: false,
+            metrics: Arc::new(ReadinessMetrics::default()),
         }
     }
 
-    async fn rpc(&self, method: &str) -> Result<Value, ()> {
+    pub(crate) async fn rpc(&self, method: &str) -> Result<Value, ()> {
         self.rpc_with_params(method, None).await
     }
 
-    async fn rpc_with_params(&self, method: &str, params: Option<Value>) -> Result<Value, ()> {
+    pub(crate) async fn rpc_with_params(
+        &self,
+        method: &str,
+        params: Option<Value>,
+    ) -> Result<Value, ()> {
         // Backpressure is bounded: no unbounded simultaneous Stellar RPC calls.
         // Permit release is automatic, including after timeout/cancellation.
         let _permit = self.rpc_permits.try_acquire().map_err(|_| ())?;
         let mut response = self.http.post(&self.rpc_url)
             .json(&json!({"jsonrpc":"2.0","id":"stealthbridge-observer","method":method,"params":params.unwrap_or(json!({}))}))
             .send().await.map_err(|_| ())?;
-        if !response.status().is_success() {return Err(());}
-        if response.content_length().is_some_and(|len| len > MAX_RPC_BODY_BYTES as u64) {
+        if !response.status().is_success() {
+            return Err(());
+        }
+        if response
+            .content_length()
+            .is_some_and(|len| len > MAX_RPC_BODY_BYTES as u64)
+        {
             return Err(());
         }
         // Do not use response.json(): a broken RPC could return arbitrarily
         // large, untrusted XDR/event payloads before parsing even starts.
         let mut body = Vec::with_capacity(4096);
         while let Some(chunk) = response.chunk().await.map_err(|_| ())? {
-            if chunk.len() > MAX_RPC_BODY_BYTES - body.len() {return Err(());}
+            if chunk.len() > MAX_RPC_BODY_BYTES - body.len() {
+                return Err(());
+            }
             body.extend_from_slice(&chunk);
         }
         let payload: Value = serde_json::from_slice(&body).map_err(|_| ())?;
@@ -261,10 +374,15 @@ impl AppState {
     fn checked_rpc_envelope(payload: &Value) -> Result<Value, ()> {
         if payload.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
             || payload.get("id").and_then(Value::as_str) != Some("stealthbridge-observer")
-            || payload.get("error").is_some_and(|value| !value.is_null()) {
+            || payload.get("error").is_some_and(|value| !value.is_null())
+        {
             return Err(());
         }
-        payload.get("result").filter(|value| !value.is_null()).cloned().ok_or(())
+        payload
+            .get("result")
+            .filter(|value| !value.is_null())
+            .cloned()
+            .ok_or(())
     }
 
     async fn network(&self) -> Result<NetworkStatus, ()> {
@@ -277,19 +395,31 @@ impl AppState {
 /// Validate both JSON-RPC observations before publishing network state.
 /// Readiness separately determines whether a structurally valid head is fresh.
 fn verified_network_status(network: &Value, latest: &Value) -> Result<NetworkStatus, ()> {
-    let passphrase = network.get("passphrase").and_then(Value::as_str).ok_or(())?;
+    let passphrase = network
+        .get("passphrase")
+        .and_then(Value::as_str)
+        .ok_or(())?;
     if passphrase != TESTNET_PASSPHRASE {
         warn!("Configured Stellar RPC did not identify as Testnet");
         return Err(());
     }
-    let protocol_version = latest.get("protocolVersion").and_then(Value::as_u64).ok_or(())?;
+    let protocol_version = latest
+        .get("protocolVersion")
+        .and_then(Value::as_u64)
+        .ok_or(())?;
     let ledger_sequence = latest.get("sequence").and_then(Value::as_u64).ok_or(())?;
     if protocol_version == 0 || ledger_sequence == 0 {
         return Err(());
     }
     let closed = latest.get("closeTime").and_then(Value::as_str).ok_or(())?;
-    if closed.is_empty() || closed.len() > 20 || !closed.bytes().all(|b| b.is_ascii_digit())
-        || closed.parse::<u64>().ok().filter(|value| *value > 0).is_none()
+    if closed.is_empty()
+        || closed.len() > 20
+        || !closed.bytes().all(|b| b.is_ascii_digit())
+        || closed
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .is_none()
     {
         return Err(());
     }
@@ -346,16 +476,24 @@ impl Corridor {
     /// Database CHECK constraints are a first defense. Validate again at
     /// the public API boundary in case an operator bypassed the CLI.
     fn safe_public_record(&self) -> bool {
-        let country = |value: &str| value.len() == 2
-            && value.bytes().all(|b| b.is_ascii_uppercase());
+        let country =
+            |value: &str| value.len() == 2 && value.bytes().all(|b| b.is_ascii_uppercase());
         country(&self.origin_country)
             && country(&self.destination_country)
             && self.origin_country != self.destination_country
             && !self.asset_code.is_empty()
             && self.asset_code.len() <= 64
-            && self.asset_code.bytes().all(|b| b.is_ascii_alphanumeric() || b"_:-".contains(&b))
-            && matches!(self.privacy_rail.as_str(), "confidential-token" | "private-payments")
-            && self.asset_issuer.as_deref()
+            && self
+                .asset_code
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_:-".contains(&b))
+            && matches!(
+                self.privacy_rail.as_str(),
+                "confidential-token" | "private-payments"
+            )
+            && self
+                .asset_issuer
+                .as_deref()
                 .is_none_or(|issuer| crate::wallet::decode_account_address(issuer).is_some())
     }
 }
@@ -390,43 +528,70 @@ fn public_api_directory() -> Value {
 
 /// Browsers receive a self-contained landing page; API clients receive JSON.
 /// Content negotiation uses a fixed response, never reflects user input.
-async fn api_home(headers:HeaderMap) -> Response {
-    if headers.get(header::ACCEPT).and_then(|v|v.to_str().ok())
-        .is_some_and(|accept|accept.split(',').any(|part|part.trim().starts_with("text/html")))
+async fn api_home(headers: HeaderMap) -> Response {
+    if headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|accept| {
+            accept
+                .split(',')
+                .any(|part| part.trim().starts_with("text/html"))
+        })
     {
-        let mut response=axum::response::Html(include_str!("api-landing.html")).into_response();
+        let mut response = axum::response::Html(include_str!("api-landing.html")).into_response();
         response.headers_mut().insert(
             header::CONTENT_SECURITY_POLICY,
             HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
         );
-        response.headers_mut().insert(header::CACHE_CONTROL,HeaderValue::from_static("no-store"));
-        response.headers_mut().insert(header::X_CONTENT_TYPE_OPTIONS,HeaderValue::from_static("nosniff"));
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        response.headers_mut().insert(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        );
         return response;
     }
     (
-        [(header::CACHE_CONTROL,HeaderValue::from_static("no-store")),
-         (header::X_CONTENT_TYPE_OPTIONS,HeaderValue::from_static("nosniff"))],
-        Json(public_api_directory())
-    ).into_response()
+        [
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+            (
+                header::X_CONTENT_TYPE_OPTIONS,
+                HeaderValue::from_static("nosniff"),
+            ),
+        ],
+        Json(public_api_directory()),
+    )
+        .into_response()
 }
 
 async fn api_directory() -> impl IntoResponse {
-    ([(header::CACHE_CONTROL,HeaderValue::from_static("no-store"))],
-     Json(public_api_directory()))
+    (
+        [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
+        Json(public_api_directory()),
+    )
 }
 
 /// This endpoint is not evidence of chain connectivity; /v1/network verifies live RPC.
 async fn health() -> Json<Health> {
-    Json(Health {status:"ok", service:"stealthbridge-backend"})
+    Json(Health {
+        status: "ok",
+        service: "stealthbridge-backend",
+    })
 }
 async fn network(State(state): State<Arc<AppState>>) -> Result<Json<NetworkStatus>, StatusCode> {
-    state.network().await.map(Json).map_err(|_| StatusCode::BAD_GATEWAY)
+    state
+        .network()
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::BAD_GATEWAY)
 }
 
 /// Immutable build-time snapshot from stealthbridge-contracts/deployments/testnet.
 /// Manifest VERIFIED does NOT equal independent on-chain verification.
 const CONTRACT_MANIFEST: &str = include_str!("../deployments/testnet/manifest.json");
-const CONTRACT_INTERFACE: &str = include_str!("../deployments/testnet/public-soroban-interface.v1.json");
+const CONTRACT_INTERFACE: &str =
+    include_str!("../deployments/testnet/public-soroban-interface.v1.json");
 #[derive(Serialize)]
 struct ContractDiscovery {
     network: &'static str,
@@ -436,35 +601,44 @@ struct ContractDiscovery {
     on_chain_verified: bool,
     payment_execution_enabled: bool,
 }
-async fn contract_discovery() -> Result<Json<ContractDiscovery>,StatusCode> {
-    let manifest:Value=serde_json::from_str(CONTRACT_MANIFEST)
-        .map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?;
-    if manifest.get("schemaVersion").and_then(Value::as_u64)!=Some(1)
-        || manifest.get("network").and_then(Value::as_str)!=Some("testnet")
-        || manifest.get("status").and_then(Value::as_str)!=Some("not-deployed")
-        || manifest.get("verified").and_then(Value::as_bool)!=Some(false)
-        || manifest.get("contractAddresses").and_then(Value::as_object)
-            .is_none_or(|addresses|!addresses.is_empty())
-        || manifest.get("txHashes").and_then(Value::as_array)
-            .is_none_or(|hashes|!hashes.is_empty())
+async fn contract_discovery() -> Result<Json<ContractDiscovery>, StatusCode> {
+    let manifest: Value =
+        serde_json::from_str(CONTRACT_MANIFEST).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    if manifest.get("schemaVersion").and_then(Value::as_u64) != Some(1)
+        || manifest.get("network").and_then(Value::as_str) != Some("testnet")
+        || manifest.get("status").and_then(Value::as_str) != Some("not-deployed")
+        || manifest.get("verified").and_then(Value::as_bool) != Some(false)
+        || manifest
+            .get("contractAddresses")
+            .and_then(Value::as_object)
+            .is_none_or(|addresses| !addresses.is_empty())
+        || manifest
+            .get("txHashes")
+            .and_then(Value::as_array)
+            .is_none_or(|hashes| !hashes.is_empty())
     {
         // Never serve a future claimed deployment until a separate on-chain
         // attestation workflow is implemented and reviewed.
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
-    let public_interface:Value=serde_json::from_str(CONTRACT_INTERFACE)
-        .map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?;
-    if public_interface.get("schemaVersion").and_then(Value::as_u64)!=Some(1)
-        || public_interface.get("network").and_then(Value::as_str)!=Some("testnet")
-        || public_interface.get("status").and_then(Value::as_str)!=Some("source-interface-only")
-    { return Err(StatusCode::SERVICE_UNAVAILABLE); }
-    Ok(Json(ContractDiscovery{
-        network:"testnet",
-        source:"stealthbridge-contracts/deployments/testnet/manifest.json",
+    let public_interface: Value =
+        serde_json::from_str(CONTRACT_INTERFACE).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    if public_interface
+        .get("schemaVersion")
+        .and_then(Value::as_u64)
+        != Some(1)
+        || public_interface.get("network").and_then(Value::as_str) != Some("testnet")
+        || public_interface.get("status").and_then(Value::as_str) != Some("source-interface-only")
+    {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    Ok(Json(ContractDiscovery {
+        network: "testnet",
+        source: "stealthbridge-contracts/deployments/testnet/manifest.json",
         manifest,
         public_interface,
-        on_chain_verified:false,
-        payment_execution_enabled:false,
+        on_chain_verified: false,
+        payment_execution_enabled: false,
     }))
 }
 
@@ -478,106 +652,154 @@ async fn contract_discovery() -> Result<Json<ContractDiscovery>,StatusCode> {
 /// one getLedgerEntries read shared by current code AND stored administrators.
 /// The deployment receipts are independently confirmed against Horizon.
 /// A positive consistency result is never a signed manifest or spending approval.
-async fn governance_snapshot(State(state):State<Arc<AppState>>)->Result<Json<Value>,StatusCode>{
- let n=state.network().await.map_err(|_|StatusCode::BAD_GATEWAY)?;
- let closed:u64=n.ledger_closed_at_unix.parse().map_err(|_|StatusCode::BAD_GATEWAY)?;
- let now=SystemTime::now().duration_since(UNIX_EPOCH)
-  .map_err(|_|StatusCode::BAD_GATEWAY)?.as_secs();
- if closed>now.saturating_add(30)||now.saturating_sub(closed)>180{
-  return Err(StatusCode::SERVICE_UNAVAILABLE);
- }
- let entries=state.rpc_with_params("getLedgerEntries",
-  Some(json!({"keys":crate::governance_code::ledger_keys(),"xdrFormat":"base64"})))
-  .await.map_err(|_|StatusCode::BAD_GATEWAY)?;
- let code=crate::governance_code::assess(&entries,n.ledger_sequence)
-  .map_err(|_|StatusCode::BAD_GATEWAY)?;
- let mut administrators=crate::governance_admin::assess(&entries,n.ledger_sequence)
-  .map_err(|_|StatusCode::BAD_GATEWAY)?;
- // Both observations refer to the SAME getLedgerEntries response; bind
- // receipts to that observed ledger as well, rather than three RPC races.
- let ledger=code["observed_ledger_sequence"].as_u64().ok_or(StatusCode::BAD_GATEWAY)?;
- if administrators["observed_ledger_sequence"].as_u64()!=Some(ledger){
-  return Err(StatusCode::BAD_GATEWAY);
- }
- administrators["observed_ledger_closed_at_unix"]=json!(n.ledger_closed_at_unix);
- let release=crate::governance_release::observe(
-  &state.http,ledger,&n.ledger_closed_at_unix)
-  .await.map_err(|_|StatusCode::BAD_GATEWAY)?;
- let consistent=crate::governance_consistency::consistent_public_governance(
-  &release,&code,&administrators);
- Ok(Json(json!({
-  "schema_version":1,"network":"testnet",
-  "source":"stellar-rpc+stellar-horizon",
-  "state":if consistent{"consistent-observations"}else{"unverified"},
-  "reason":if consistent{"Public same-ledger observations agree; canonical release not attested"}
-           else{"Code, public administrator or deployment receipt observations disagree"},
-  "observed_ledger_sequence":ledger,
-  // Fresh Testnet network-head close time (up to 15 ledgers from entry read).
-  "observed_network_head_closed_at_unix":n.ledger_closed_at_unix,
-  "release":release,"code":code,"administrators":administrators,
-  "canonical_manifest_attested":false,"signer_possession_verified":false,
-  "trusted_for_execution":false,"privacy_verified":false,
-  "payment_execution_enabled":false,"fee_collection_enabled":false
- })))
+async fn governance_snapshot(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, StatusCode> {
+    let n = state.network().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let closed: u64 = n
+        .ledger_closed_at_unix
+        .parse()
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| StatusCode::BAD_GATEWAY)?
+        .as_secs();
+    if closed > now.saturating_add(30) || now.saturating_sub(closed) > 180 {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let entries = state
+        .rpc_with_params(
+            "getLedgerEntries",
+            Some(json!({"keys":crate::governance_code::ledger_keys(),"xdrFormat":"base64"})),
+        )
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let code = crate::governance_code::assess(&entries, n.ledger_sequence)
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let mut administrators = crate::governance_admin::assess(&entries, n.ledger_sequence)
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    // Both observations refer to the SAME getLedgerEntries response; bind
+    // receipts to that observed ledger as well, rather than three RPC races.
+    let ledger = code["observed_ledger_sequence"]
+        .as_u64()
+        .ok_or(StatusCode::BAD_GATEWAY)?;
+    if administrators["observed_ledger_sequence"].as_u64() != Some(ledger) {
+        return Err(StatusCode::BAD_GATEWAY);
+    }
+    administrators["observed_ledger_closed_at_unix"] = json!(n.ledger_closed_at_unix);
+    let release = crate::governance_release::observe(&state.http, ledger, &n.ledger_closed_at_unix)
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let consistent = crate::governance_consistency::consistent_public_governance(
+        &release,
+        &code,
+        &administrators,
+    );
+    Ok(Json(json!({
+     "schema_version":1,"network":"testnet",
+     "source":"stellar-rpc+stellar-horizon",
+     "state":if consistent{"consistent-observations"}else{"unverified"},
+     "reason":if consistent{"Public same-ledger observations agree; canonical release not attested"}
+              else{"Code, public administrator or deployment receipt observations disagree"},
+     "observed_ledger_sequence":ledger,
+     // Fresh Testnet network-head close time (up to 15 ledgers from entry read).
+     "observed_network_head_closed_at_unix":n.ledger_closed_at_unix,
+     "release":release,"code":code,"administrators":administrators,
+     "canonical_manifest_attested":false,"signer_possession_verified":false,
+     "trusted_for_execution":false,"privacy_verified":false,
+     "payment_execution_enabled":false,"fee_collection_enabled":false
+    })))
 }
-async fn governance_admin(State(state):State<Arc<AppState>>)->Result<Json<Value>,StatusCode>{
- let n=state.network().await.map_err(|_|StatusCode::BAD_GATEWAY)?;
- let closed:u64=n.ledger_closed_at_unix.parse().map_err(|_|StatusCode::BAD_GATEWAY)?;
- let now=SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_|StatusCode::BAD_GATEWAY)?.as_secs();
- if closed>now.saturating_add(30)||now.saturating_sub(closed)>180{
-  return Err(StatusCode::SERVICE_UNAVAILABLE);
- }
- let keys=crate::governance_code::ledger_keys();
- let reply=state.rpc_with_params("getLedgerEntries",
-  Some(json!({"keys":keys,"xdrFormat":"base64"})))
-  .await.map_err(|_|StatusCode::BAD_GATEWAY)?;
- let mut verified=crate::governance_admin::assess(&reply,n.ledger_sequence)
-  .map_err(|_|StatusCode::BAD_GATEWAY)?;
- // Bind the administrator observation to the independently checked, fresh
- // Testnet RPC head. Offline/replayed SDK consumers must refuse stale data.
- verified["observed_ledger_closed_at_unix"]=json!(n.ledger_closed_at_unix);
- Ok(Json(verified))
+async fn governance_admin(State(state): State<Arc<AppState>>) -> Result<Json<Value>, StatusCode> {
+    let n = state.network().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let closed: u64 = n
+        .ledger_closed_at_unix
+        .parse()
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| StatusCode::BAD_GATEWAY)?
+        .as_secs();
+    if closed > now.saturating_add(30) || now.saturating_sub(closed) > 180 {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let keys = crate::governance_code::ledger_keys();
+    let reply = state
+        .rpc_with_params(
+            "getLedgerEntries",
+            Some(json!({"keys":keys,"xdrFormat":"base64"})),
+        )
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let mut verified = crate::governance_admin::assess(&reply, n.ledger_sequence)
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    // Bind the administrator observation to the independently checked, fresh
+    // Testnet RPC head. Offline/replayed SDK consumers must refuse stale data.
+    verified["observed_ledger_closed_at_unix"] = json!(n.ledger_closed_at_unix);
+    Ok(Json(verified))
 }
-async fn governance_code(State(state):State<Arc<AppState>>)->Result<Json<Value>,StatusCode>{
- let n=state.network().await.map_err(|_|StatusCode::BAD_GATEWAY)?;
- let closed:u64=n.ledger_closed_at_unix.parse().map_err(|_|StatusCode::BAD_GATEWAY)?;
- let now=SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_|StatusCode::BAD_GATEWAY)?.as_secs();
- if closed>now.saturating_add(30)||now.saturating_sub(closed)>180{
-  return Err(StatusCode::SERVICE_UNAVAILABLE);
- }
- let keys=crate::governance_code::ledger_keys();
- let response=state.rpc_with_params("getLedgerEntries",
-  Some(json!({"keys":keys,"xdrFormat":"base64"})))
-  .await.map_err(|_|StatusCode::BAD_GATEWAY)?;
- crate::governance_code::assess(&response,n.ledger_sequence)
-  .map(Json).map_err(|_|StatusCode::BAD_GATEWAY)
+async fn governance_code(State(state): State<Arc<AppState>>) -> Result<Json<Value>, StatusCode> {
+    let n = state.network().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let closed: u64 = n
+        .ledger_closed_at_unix
+        .parse()
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| StatusCode::BAD_GATEWAY)?
+        .as_secs();
+    if closed > now.saturating_add(30) || now.saturating_sub(closed) > 180 {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let keys = crate::governance_code::ledger_keys();
+    let response = state
+        .rpc_with_params(
+            "getLedgerEntries",
+            Some(json!({"keys":keys,"xdrFormat":"base64"})),
+        )
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    crate::governance_code::assess(&response, n.ledger_sequence)
+        .map(Json)
+        .map_err(|_| StatusCode::BAD_GATEWAY)
 }
-async fn governance_release(State(state):State<Arc<AppState>>)->Result<Json<Value>,StatusCode>{
- let n=state.network().await.map_err(|_|StatusCode::BAD_GATEWAY)?;
- let closed:u64=n.ledger_closed_at_unix.parse().map_err(|_|StatusCode::BAD_GATEWAY)?;
- let now=SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_|StatusCode::BAD_GATEWAY)?.as_secs();
- if closed>now.saturating_add(30)||now.saturating_sub(closed)>180{
-  return Err(StatusCode::SERVICE_UNAVAILABLE);
- }
- crate::governance_release::observe(&state.http,n.ledger_sequence,&n.ledger_closed_at_unix)
-  .await.map(Json).map_err(|_|StatusCode::BAD_GATEWAY)
+async fn governance_release(State(state): State<Arc<AppState>>) -> Result<Json<Value>, StatusCode> {
+    let n = state.network().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let closed: u64 = n
+        .ledger_closed_at_unix
+        .parse()
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| StatusCode::BAD_GATEWAY)?
+        .as_secs();
+    if closed > now.saturating_add(30) || now.saturating_sub(closed) > 180 {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    crate::governance_release::observe(&state.http, n.ledger_sequence, &n.ledger_closed_at_unix)
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::BAD_GATEWAY)
 }
 async fn capabilities() -> Json<Capabilities> {
     // No real payment handlers or privacy verifications have been implemented.
     // These flags remain false until code and independently reproducible evidence exist.
-    Json(Capabilities{
-        payments_enabled:false,
-        confidential_token_verified:false,
-        private_payments_verified:false,
-        fiat_payouts_enabled:false,
+    Json(Capabilities {
+        payments_enabled: false,
+        confidential_token_verified: false,
+        private_payments_verified: false,
+        fiat_payouts_enabled: false,
     })
 }
 async fn corridors(State(state): State<Arc<AppState>>) -> Result<Json<Vec<Corridor>>, StatusCode> {
     let pool = state.db.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let rows = sqlx::query_as::<_, Corridor>(
         "SELECT id, origin_country, destination_country, asset_code, asset_issuer, privacy_rail \
-         FROM corridors WHERE enabled = TRUE ORDER BY origin_country, destination_country, id"
-    ).fetch_all(pool).await.map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+         FROM corridors WHERE enabled = TRUE ORDER BY origin_country, destination_country, id",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     if !rows.iter().all(Corridor::safe_public_record) {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
@@ -601,9 +823,10 @@ fn valid_corridor_filters(params: &CorridorPageParams) -> bool {
     let country = |value: &str| value.len() == 2 && value.bytes().all(|b| b.is_ascii_uppercase());
     params.origin_country.as_deref().is_none_or(country)
         && params.destination_country.as_deref().is_none_or(country)
-        && params.privacy_rail.as_deref().is_none_or(|rail| {
-            matches!(rail, "private-payments" | "confidential-token")
-        })
+        && params
+            .privacy_rail
+            .as_deref()
+            .is_none_or(|rail| matches!(rail, "private-payments" | "confidential-token"))
 }
 /// Keyset pagination by immutable corridor UUID with optional exact
 /// metadata filters. This is a public *catalog*, not payment eligibility.
@@ -643,24 +866,34 @@ async fn corridor_page(
     } else {
         None
     };
-    Ok(Json(CorridorPage { items: rows, next_cursor }))
+    Ok(Json(CorridorPage {
+        items: rows,
+        next_cursor,
+    }))
 }
 /// Read exactly one operator-configured, enabled corridor. Never invent entries.
 async fn corridor_by_id(
-    Path(id):Path<String>,State(state):State<Arc<AppState>>
-)->Result<Json<Corridor>,StatusCode>{
-    let id=Uuid::parse_str(&id).map_err(|_|StatusCode::BAD_REQUEST)?;
-    let pool=state.db.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    sqlx::query_as::<_,Corridor>(
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Corridor>, StatusCode> {
+    let id = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let pool = state.db.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    sqlx::query_as::<_, Corridor>(
         "SELECT id, origin_country, destination_country, asset_code, asset_issuer, privacy_rail \
-         FROM corridors WHERE enabled=TRUE AND id=$1"
-    ).bind(id).fetch_optional(pool).await
-        .map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?
-        .ok_or(StatusCode::NOT_FOUND)
-        .and_then(|row| {
-            if row.safe_public_record() { Ok(Json(row)) }
-            else { Err(StatusCode::SERVICE_UNAVAILABLE) }
-        })
+         FROM corridors WHERE enabled=TRUE AND id=$1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+    .ok_or(StatusCode::NOT_FOUND)
+    .and_then(|row| {
+        if row.safe_public_record() {
+            Ok(Json(row))
+        } else {
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        }
+    })
 }
 
 /// A small, explicit set of public route identifiers. No client amount,
@@ -671,17 +904,23 @@ struct CorridorBatchQuery {
     ids: String,
 }
 fn parse_corridor_batch_ids(raw: &str) -> Result<Vec<Uuid>, StatusCode> {
-    if raw.is_empty() || raw.len() > 295 { return Err(StatusCode::BAD_REQUEST); }
+    if raw.is_empty() || raw.len() > 295 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let mut ids = Vec::new();
     for segment in raw.split(',') {
-        if segment.len() != 36 { return Err(StatusCode::BAD_REQUEST); }
-        let id = Uuid::parse_str(segment).map_err(|_|StatusCode::BAD_REQUEST)?;
+        if segment.len() != 36 {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        let id = Uuid::parse_str(segment).map_err(|_| StatusCode::BAD_REQUEST)?;
         // Canonical lowercase spelling: no ambiguous encodings or repeated ids.
         if id.to_string() != segment || ids.contains(&id) {
             return Err(StatusCode::BAD_REQUEST);
         }
         ids.push(id);
-        if ids.len() > 8 { return Err(StatusCode::BAD_REQUEST); }
+        if ids.len() > 8 {
+            return Err(StatusCode::BAD_REQUEST);
+        }
     }
     Ok(ids)
 }
@@ -698,44 +937,62 @@ struct CorridorBatch {
     privacy_verified: bool,
     fiat_payouts_enabled: bool,
 }
-fn corridor_batch_response(ids: Vec<Uuid>, rows: Vec<Corridor>) -> Result<CorridorBatch,StatusCode> {
+fn corridor_batch_response(
+    ids: Vec<Uuid>,
+    rows: Vec<Corridor>,
+) -> Result<CorridorBatch, StatusCode> {
     if rows.len() > ids.len() || !rows.iter().all(Corridor::safe_public_record) {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
     let mut ordered = Vec::new();
     let mut missing = Vec::new();
     for id in &ids {
-        if let Some(row) = rows.iter().find(|row|row.id == *id) {
+        if let Some(row) = rows.iter().find(|row| row.id == *id) {
             ordered.push(Corridor {
-                id:row.id,origin_country:row.origin_country.clone(),
-                destination_country:row.destination_country.clone(),
-                asset_code:row.asset_code.clone(),asset_issuer:row.asset_issuer.clone(),
-                privacy_rail:row.privacy_rail.clone()
+                id: row.id,
+                origin_country: row.origin_country.clone(),
+                destination_country: row.destination_country.clone(),
+                asset_code: row.asset_code.clone(),
+                asset_issuer: row.asset_issuer.clone(),
+                privacy_rail: row.privacy_rail.clone(),
             });
-        } else { missing.push(*id); }
+        } else {
+            missing.push(*id);
+        }
     }
     if ordered.len() != rows.len() {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
     let complete = missing.is_empty();
     Ok(CorridorBatch {
-        schema_version:1,network:"testnet",source:"operator-corridor-batch",
-        requested_ids:ids,items:ordered,missing_ids:missing,all_configured:complete,
-        payment_execution_enabled:false,privacy_verified:false,fiat_payouts_enabled:false,
+        schema_version: 1,
+        network: "testnet",
+        source: "operator-corridor-batch",
+        requested_ids: ids,
+        items: ordered,
+        missing_ids: missing,
+        all_configured: complete,
+        payment_execution_enabled: false,
+        privacy_verified: false,
+        fiat_payouts_enabled: false,
     })
 }
 /// One bounded read of enabled operator corridor IDs. A full catalog match
 /// conveys no authorization, liquidity, FX, issuer support or financial readiness.
 async fn corridor_batch(
-    State(state):State<Arc<AppState>>, Query(params):Query<CorridorBatchQuery>
-)->Result<([(header::HeaderName,HeaderValue);1],Json<CorridorBatch>),StatusCode>{
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<CorridorBatchQuery>,
+) -> Result<([(header::HeaderName, HeaderValue); 1], Json<CorridorBatch>), StatusCode> {
     let ids = parse_corridor_batch_ids(&params.ids)?;
     let pool = state.db.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let rows = sqlx::query_as::<_,Corridor>(
         "SELECT id,origin_country,destination_country,asset_code,asset_issuer,privacy_rail          FROM corridors WHERE enabled=TRUE AND id = ANY($1::uuid[])"
     ).bind(&ids).fetch_all(pool).await.map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?;
-    let result = corridor_batch_response(ids,rows)?;
-    Ok(([(header::CACHE_CONTROL,HeaderValue::from_static("no-store"))],Json(result)))
+    let result = corridor_batch_response(ids, rows)?;
+    Ok((
+        [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
+        Json(result),
+    ))
 }
 
 /// One consistent operator-corridor snapshot plus live dependency health.
@@ -758,38 +1015,60 @@ struct CorridorBatchPreflight {
     fiat_payouts_enabled: bool,
 }
 fn build_batch_preflight(
-    batch: CorridorBatch, network_fresh: bool, ledger_sequence: Option<u64>,
-    schema_ready: bool, now: u64,
+    batch: CorridorBatch,
+    network_fresh: bool,
+    ledger_sequence: Option<u64>,
+    schema_ready: bool,
+    now: u64,
 ) -> CorridorBatchPreflight {
     CorridorBatchPreflight {
-        schema_version:1,network:"testnet",
-        source:"live-batch-metadata-preflight",observed_at_unix:now,
-        batch,network_fresh,ledger_sequence:if network_fresh {ledger_sequence} else {None},
-        database_schema_ready:schema_ready,
-        read_only_dependencies_ready:network_fresh && schema_ready,
-        payment_execution_enabled:false,fee_quote_available:false,
-        liquidity_verified:false,issuer_verified:false,privacy_verified:false,
-        fiat_payouts_enabled:false
+        schema_version: 1,
+        network: "testnet",
+        source: "live-batch-metadata-preflight",
+        observed_at_unix: now,
+        batch,
+        network_fresh,
+        ledger_sequence: if network_fresh { ledger_sequence } else { None },
+        database_schema_ready: schema_ready,
+        read_only_dependencies_ready: network_fresh && schema_ready,
+        payment_execution_enabled: false,
+        fee_quote_available: false,
+        liquidity_verified: false,
+        issuer_verified: false,
+        privacy_verified: false,
+        fiat_payouts_enabled: false,
     }
 }
 /// GET-only. Payment fields never enter the API: only public UUIDs.
 async fn corridor_batch_preflight(
-    State(state):State<Arc<AppState>>,Query(params):Query<CorridorBatchQuery>,
-)->Result<([(header::HeaderName,HeaderValue);1],Json<CorridorBatchPreflight>),StatusCode>{
-    let ids=parse_corridor_batch_ids(&params.ids)?;
-    let pool=state.db.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<CorridorBatchQuery>,
+) -> Result<
+    (
+        [(header::HeaderName, HeaderValue); 1],
+        Json<CorridorBatchPreflight>,
+    ),
+    StatusCode,
+> {
+    let ids = parse_corridor_batch_ids(&params.ids)?;
+    let pool = state.db.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let rows=sqlx::query_as::<_,Corridor>(
         "SELECT id,origin_country,destination_country,asset_code,asset_issuer,privacy_rail FROM corridors WHERE enabled=TRUE AND id=ANY($1::uuid[])"
     ).bind(&ids).fetch_all(pool).await.map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?;
-    let batch=corridor_batch_response(ids,rows)?;
-    let (head,schema_ready)=tokio::join!(state.network(),database_schema_ready(pool));
-    let now=SystemTime::now().duration_since(UNIX_EPOCH)
-       .map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?.as_secs();
-    let fresh=head.as_ref().is_ok_and(|value|
-       ledger_is_fresh(&value.ledger_closed_at_unix,now,180));
-    let seq=head.ok().map(|value|value.ledger_sequence);
-    Ok(([(header::CACHE_CONTROL,HeaderValue::from_static("no-store"))],
-        Json(build_batch_preflight(batch,fresh,seq,schema_ready,now))))
+    let batch = corridor_batch_response(ids, rows)?;
+    let (head, schema_ready) = tokio::join!(state.network(), database_schema_ready(pool));
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .as_secs();
+    let fresh = head
+        .as_ref()
+        .is_ok_and(|value| ledger_is_fresh(&value.ledger_closed_at_unix, now, 180));
+    let seq = head.ok().map(|value| value.ledger_sequence);
+    Ok((
+        [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
+        Json(build_batch_preflight(batch, fresh, seq, schema_ready, now)),
+    ))
 }
 
 /// An operator-configured corridor is catalog metadata, never a payable quote.
@@ -812,26 +1091,42 @@ struct CorridorPreflight {
     fiat_payouts_enabled: bool,
 }
 fn build_corridor_preflight(
-    corridor: Corridor, network_fresh: bool, ledger_sequence: Option<u64>,
-    schema_ready: bool, now: u64,
+    corridor: Corridor,
+    network_fresh: bool,
+    ledger_sequence: Option<u64>,
+    schema_ready: bool,
+    now: u64,
 ) -> CorridorPreflight {
     CorridorPreflight {
-        schema_version: 1, network: "testnet",
-        source: "live-corridor-metadata-preflight", observed_at_unix: now,
-        corridor, network_fresh,
+        schema_version: 1,
+        network: "testnet",
+        source: "live-corridor-metadata-preflight",
+        observed_at_unix: now,
+        corridor,
+        network_fresh,
         ledger_sequence: if network_fresh { ledger_sequence } else { None },
         database_schema_ready: schema_ready,
         read_only_dependencies_ready: network_fresh && schema_ready,
-        payment_execution_enabled: false, fee_quote_available: false,
-        liquidity_verified: false, issuer_verified: false,
-        privacy_verified: false, fiat_payouts_enabled: false,
+        payment_execution_enabled: false,
+        fee_quote_available: false,
+        liquidity_verified: false,
+        issuer_verified: false,
+        privacy_verified: false,
+        fiat_payouts_enabled: false,
     }
 }
 /// GET-only, corridor-scoped live review metadata. Neither recipient, amount,
 /// account, FX nor payment intent is ever sent to this endpoint.
 async fn corridor_preflight(
-    Path(id): Path<String>, State(state): State<Arc<AppState>>,
-) -> Result<([(header::HeaderName, HeaderValue); 1], Json<CorridorPreflight>), StatusCode> {
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<
+    (
+        [(header::HeaderName, HeaderValue); 1],
+        Json<CorridorPreflight>,
+    ),
+    StatusCode,
+> {
     let id = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
     let pool = state.db.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let corridor = sqlx::query_as::<_, Corridor>(
@@ -843,14 +1138,24 @@ async fn corridor_preflight(
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
     let (ledger, schema_ready) = tokio::join!(state.network(), database_schema_ready(pool));
-    let now = SystemTime::now().duration_since(UNIX_EPOCH)
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?.as_secs();
-    let fresh = ledger.as_ref().is_ok_and(|head|
-        ledger_is_fresh(&head.ledger_closed_at_unix, now, 180)
-    );
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .as_secs();
+    let fresh = ledger
+        .as_ref()
+        .is_ok_and(|head| ledger_is_fresh(&head.ledger_closed_at_unix, now, 180));
     let ledger_sequence = ledger.ok().map(|head| head.ledger_sequence);
-    Ok(([(header::CACHE_CONTROL,HeaderValue::from_static("no-store"))],
-        Json(build_corridor_preflight(corridor, fresh, ledger_sequence, schema_ready, now))))
+    Ok((
+        [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
+        Json(build_corridor_preflight(
+            corridor,
+            fresh,
+            ledger_sequence,
+            schema_ready,
+            now,
+        )),
+    ))
 }
 
 #[derive(Serialize)]
@@ -859,42 +1164,57 @@ struct ApiError {
     message: &'static str,
 }
 async fn disabled() -> (StatusCode, Json<ApiError>) {
-    (StatusCode::NOT_IMPLEMENTED, Json(ApiError {
-        code:"NOT_AVAILABLE",
-        message:"Confidential settlement is not enabled. No transaction was submitted.",
-    }))
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(ApiError {
+            code: "NOT_AVAILABLE",
+            message: "Confidential settlement is not enabled. No transaction was submitted.",
+        }),
+    )
 }
 
-
 async fn public_transaction(
-    Path(hash): Path<String>, State(state): State<Arc<AppState>>,
+    Path(hash): Path<String>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<TransactionObservation>, StatusCode> {
-    if !transaction::valid_hash(&hash) { return Err(StatusCode::BAD_REQUEST); }
+    if !transaction::valid_hash(&hash) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     // Fail closed against accidentally pointing a deployment at another network.
-    let network = state.rpc("getNetwork").await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let network = state
+        .rpc("getNetwork")
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
     if network.get("passphrase").and_then(Value::as_str) != Some(TESTNET_PASSPHRASE) {
         return Err(StatusCode::BAD_GATEWAY);
     }
-    let result = state.rpc_with_params("getTransaction", Some(json!({"hash":hash.to_ascii_lowercase()})))
-        .await.map_err(|_| StatusCode::BAD_GATEWAY)?;
-    transaction::parse_result(&hash,&result)
+    let result = state
+        .rpc_with_params(
+            "getTransaction",
+            Some(json!({"hash":hash.to_ascii_lowercase()})),
+        )
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    transaction::parse_result(&hash, &result)
         .map_err(|_| StatusCode::BAD_GATEWAY)?
-        .map(Json).ok_or(StatusCode::NOT_FOUND)
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
 }
-
 
 /// Public metadata-only view of the last operator-enabled observer checkpoint.
 /// This says nothing about a user payment, note privacy or provider payout.
 async fn observer_head(
-    State(state):State<Arc<AppState>>,
-)->Result<Json<LedgerCheckpoint>,StatusCode>{
-    let pool=state.db.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<LedgerCheckpoint>, StatusCode> {
+    let pool = state.db.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     // A stale or corrupted persisted row is never promoted to a healthy
     // observation. Bound the DB wait to protect stateless Vercel handlers.
-    tokio::time::timeout(Duration::from_secs(2),ledger::last_head(pool))
-        .await.map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?
-        .map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?
-        .map(Json).ok_or(StatusCode::NOT_FOUND)
+    tokio::time::timeout(Duration::from_secs(2), ledger::last_head(pool))
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
 }
 
 /// Observe only pinned upstream Testnet artifacts; no customer account exists.
@@ -947,128 +1267,178 @@ async fn smart_account_kit(
 /// An existing Soroban C-address can be any contract, not necessarily a smart wallet.
 /// Never calls __check_auth, requests a signature, or makes financial claims.
 async fn public_contract_instance(
- State(state):State<Arc<AppState>>,Path(address):Path<String>,
-)->Result<Json<Value>,StatusCode>{
- let key=crate::smart_account::instance_ledger_key(&address).ok_or(StatusCode::BAD_REQUEST)?;
- let head=state.network().await.map_err(|_|StatusCode::BAD_GATEWAY)?;
- let now=SystemTime::now().duration_since(UNIX_EPOCH)
-  .map_err(|_|StatusCode::BAD_GATEWAY)?.as_secs();
- if !ledger_is_fresh(&head.ledger_closed_at_unix,now,180){
-  return Err(StatusCode::SERVICE_UNAVAILABLE);
- }
- let result=state.rpc_with_params("getLedgerEntries",Some(json!({
-  "keys":[key.clone()],"xdrFormat":"base64"
- }))).await.map_err(|_|StatusCode::BAD_GATEWAY)?;
- let entry=crate::smart_account::inspect_entry(&result,head.ledger_sequence,&key)
-  .map_err(|_|StatusCode::BAD_GATEWAY)?;
- let found=entry.is_some();
- Ok(Json(json!({
-  "schema_version":1,"network":"testnet",
-  "source":"stellar-rpc/getLedgerEntries",
-  "contract_address":address,
-  "contract_instance_found":found,
-  "observed_ledger_sequence":result["latestLedger"],
-  "executable_wasm_hash":entry.as_ref().map(|v|v["executable_wasm_hash"].clone()),
-  "live_until_ledger":entry.as_ref().map(|v|v["live_until_ledger"].clone()),
-  "smart_account_verified":false,
-  "signer_authority_verified":false,
-  "privacy_verified":false,
-  "payment_execution_enabled":false,
-  "fee_collection_enabled":false
- })))
+    State(state): State<Arc<AppState>>,
+    Path(address): Path<String>,
+) -> Result<Json<Value>, StatusCode> {
+    let key = crate::smart_account::instance_ledger_key(&address).ok_or(StatusCode::BAD_REQUEST)?;
+    let head = state.network().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| StatusCode::BAD_GATEWAY)?
+        .as_secs();
+    if !ledger_is_fresh(&head.ledger_closed_at_unix, now, 180) {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let result = state
+        .rpc_with_params(
+            "getLedgerEntries",
+            Some(json!({
+             "keys":[key.clone()],"xdrFormat":"base64"
+            })),
+        )
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let entry = crate::smart_account::inspect_entry(&result, head.ledger_sequence, &key)
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let found = entry.is_some();
+    Ok(Json(json!({
+     "schema_version":1,"network":"testnet",
+     "source":"stellar-rpc/getLedgerEntries",
+     "contract_address":address,
+     "contract_instance_found":found,
+     "observed_ledger_sequence":result["latestLedger"],
+     "executable_wasm_hash":entry.as_ref().map(|v|v["executable_wasm_hash"].clone()),
+     "live_until_ledger":entry.as_ref().map(|v|v["live_until_ledger"].clone()),
+     "smart_account_verified":false,
+     "signer_authority_verified":false,
+     "privacy_verified":false,
+     "payment_execution_enabled":false,
+     "fee_collection_enabled":false
+    })))
 }
 
-/// Customer-only public G-account presence. No balances or signer data returned.
-fn checked_horizon_account(payload:&Value,expected:&str)->Result<bool,()>{
- if crate::wallet::decode_account_address(expected).is_none(){return Err(());}
- if payload.get("id").and_then(Value::as_str)!=Some(expected){return Err(());}
- if payload.get("account_id").and_then(Value::as_str)!=Some(expected){return Err(());}
- Ok(true)
+/// Customer-only public G/M-account presence (resolves M... to its underlying G-account). No balances, mux ID routing, or signer data returned.
+fn checked_horizon_account(payload: &Value, expected: &str) -> Result<bool, ()> {
+    if crate::wallet::decode_account_address(expected).is_none() {
+        return Err(());
+    }
+    if payload.get("id").and_then(Value::as_str) != Some(expected) {
+        return Err(());
+    }
+    if payload.get("account_id").and_then(Value::as_str) != Some(expected) {
+        return Err(());
+    }
+    Ok(true)
 }
 async fn public_classic_recipient_presence(
- State(state):State<Arc<AppState>>,Path(address):Path<String>
-)->Result<([(header::HeaderName,HeaderValue);1],Json<Value>),StatusCode>{
- if crate::wallet::decode_account_address(&address).is_none(){
-  return Err(StatusCode::BAD_REQUEST);
- }
- let head=state.network().await.map_err(|_|StatusCode::BAD_GATEWAY)?;
- let now=SystemTime::now().duration_since(UNIX_EPOCH)
-  .map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?.as_secs();
- if !ledger_is_fresh(&head.ledger_closed_at_unix,now,180){
-  return Err(StatusCode::SERVICE_UNAVAILABLE);
- }
- // Strictly pinned Testnet Horizon host. No caller-controlled host/path/query.
- let url=format!("https://horizon-testnet.stellar.org/accounts/{address}");
- let mut response=state.http.get(&url).header(header::ACCEPT,"application/json")
-  .send().await.map_err(|_|StatusCode::BAD_GATEWAY)?;
- let found=if response.status()==StatusCode::NOT_FOUND{false}else{
-  if response.status()!=StatusCode::OK{return Err(StatusCode::BAD_GATEWAY);}
-  const MAX_HORIZON_ACCOUNT_BYTES:usize=65536;
-  if response.content_length().is_some_and(|len|len>MAX_HORIZON_ACCOUNT_BYTES as u64){
-   return Err(StatusCode::BAD_GATEWAY);
-  }
-  let mut bytes=Vec::new();
-  while let Some(chunk)=response.chunk().await.map_err(|_|StatusCode::BAD_GATEWAY)?{
-   if chunk.len()>MAX_HORIZON_ACCOUNT_BYTES.saturating_sub(bytes.len()){
-    return Err(StatusCode::BAD_GATEWAY);
-   }
-   bytes.extend_from_slice(&chunk);
-  }
-  let data:Value=serde_json::from_slice(&bytes).map_err(|_|StatusCode::BAD_GATEWAY)?;
-  checked_horizon_account(&data,&address).map_err(|_|StatusCode::BAD_GATEWAY)?
- };
- Ok(([(header::CACHE_CONTROL,HeaderValue::from_static("no-store"))],Json(json!({
-  "schema_version":1,"network":"testnet","source":"stellar-horizon/account-presence",
-  "address":address,"observed_at_unix":now,
-  "classic_account_found":found,"ownership_verified":false,
-  "asset_acceptance_verified":false,"payment_execution_enabled":false
- }))))
+    State(state): State<Arc<AppState>>,
+    Path(address): Path<String>,
+) -> Result<([(header::HeaderName, HeaderValue); 1], Json<Value>), StatusCode> {
+    let Some(lookup_account) = crate::wallet::resolve_classic_recipient_account(&address) else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let head = state.network().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .as_secs();
+    if !ledger_is_fresh(&head.ledger_closed_at_unix, now, 180) {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    // Strictly pinned Testnet Horizon host. No caller-controlled host/path/query.
+    let url = format!("https://horizon-testnet.stellar.org/accounts/{lookup_account}");
+    let mut response = state
+        .http
+        .get(&url)
+        .header(header::ACCEPT, "application/json")
+        .send()
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let found = if response.status() == StatusCode::NOT_FOUND {
+        false
+    } else {
+        if response.status() != StatusCode::OK {
+            return Err(StatusCode::BAD_GATEWAY);
+        }
+        const MAX_HORIZON_ACCOUNT_BYTES: usize = 65536;
+        if response
+            .content_length()
+            .is_some_and(|len| len > MAX_HORIZON_ACCOUNT_BYTES as u64)
+        {
+            return Err(StatusCode::BAD_GATEWAY);
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| StatusCode::BAD_GATEWAY)?
+        {
+            if chunk.len() > MAX_HORIZON_ACCOUNT_BYTES.saturating_sub(bytes.len()) {
+                return Err(StatusCode::BAD_GATEWAY);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let data: Value = serde_json::from_slice(&bytes).map_err(|_| StatusCode::BAD_GATEWAY)?;
+        checked_horizon_account(&data, &lookup_account).map_err(|_| StatusCode::BAD_GATEWAY)?
+    };
+    Ok((
+        [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
+        Json(json!({
+         "schema_version":1,"network":"testnet","source":"stellar-horizon/account-presence",
+         "address":address,"observed_at_unix":now,
+         "classic_account_found":found,"ownership_verified":false,
+         "asset_acceptance_verified":false,"payment_execution_enabled":false
+        })),
+    ))
 }
 
-/// Consent-initiated recipient lookup: client receives only whether a current
-/// contract instance exists, never its executable digest or administrator data.
+/// Consent-initiated recipient lookup (C or CAP-84 W underlying contract): client receives only
+/// whether a current contract instance exists, never its executable digest or administrator data.
 async fn public_recipient_presence(
- State(state):State<Arc<AppState>>,Path(address):Path<String>,
-)->Result<([(header::HeaderName,HeaderValue);1],Json<Value>),StatusCode>{
- // Reuse the independently checked network, key, ledger and TTL checks.
- let Json(observed)=public_contract_instance(State(state),Path(address.clone())).await?;
- let now=SystemTime::now().duration_since(UNIX_EPOCH)
-  .map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?.as_secs();
- let current=observed["observed_ledger_sequence"].as_u64()
-  .ok_or(StatusCode::BAD_GATEWAY)?;
- let found=observed["contract_instance_found"].as_bool()
-  .ok_or(StatusCode::BAD_GATEWAY)?;
- Ok(([(header::CACHE_CONTROL,HeaderValue::from_static("no-store"))],
- Json(json!({
-  "schema_version":1,"network":"testnet",
-  "source":"stellar-rpc/recipient-presence",
-  "address":address,
-  "observed_at_unix":now,
-  "observed_ledger_sequence":current,
-  "contract_instance_found":found,
-  "smart_account_verified":false,
-  "signer_authority_verified":false,
-  "recipient_asset_eligibility_verified":false,
-  "privacy_verified":false,
-  "payment_execution_enabled":false
- }))))
+    State(state): State<Arc<AppState>>,
+    Path(address): Path<String>,
+) -> Result<([(header::HeaderName, HeaderValue); 1], Json<Value>), StatusCode> {
+    let contract_address =
+        crate::wallet::resolve_contract_recipient(&address).ok_or(StatusCode::BAD_REQUEST)?;
+    // Reuse the independently checked network, key, ledger and TTL checks on the underlying C-address.
+    let Json(observed) = public_contract_instance(State(state), Path(contract_address)).await?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .as_secs();
+    let current = observed["observed_ledger_sequence"]
+        .as_u64()
+        .ok_or(StatusCode::BAD_GATEWAY)?;
+    let found = observed["contract_instance_found"]
+        .as_bool()
+        .ok_or(StatusCode::BAD_GATEWAY)?;
+    Ok((
+        [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
+        Json(json!({
+         "schema_version":1,"network":"testnet",
+         "source":"stellar-rpc/recipient-presence",
+         "address":address,
+         "observed_at_unix":now,
+         "observed_ledger_sequence":current,
+         "contract_instance_found":found,
+         "smart_account_verified":false,
+         "signer_authority_verified":false,
+         "recipient_asset_eligibility_verified":false,
+         "privacy_verified":false,
+         "payment_execution_enabled":false
+        })),
+    ))
 }
 
 async fn observer_activity(
- State(state):State<Arc<AppState>>,
- Query(options):Query<ledger_events::ActivityOptions>,
-)->Result<Json<ledger_events::ActivityPage>,StatusCode>{
- ledger_events::valid_activity_options(&options)
-   .map_err(|_|StatusCode::BAD_REQUEST)?;
- let pool=state.db.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
- tokio::time::timeout(Duration::from_secs(3),
-    ledger_events::read_activity(pool,&options)).await
-    .map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?
-    .map_err(|error|match error{
-      ledger_events::JournalError::InvalidPage |
-      ledger_events::JournalError::InvalidContract=>StatusCode::BAD_REQUEST,
-      _=>StatusCode::SERVICE_UNAVAILABLE,
-    }).map(Json)
+    State(state): State<Arc<AppState>>,
+    Query(options): Query<ledger_events::ActivityOptions>,
+) -> Result<Json<ledger_events::ActivityPage>, StatusCode> {
+    ledger_events::valid_activity_options(&options).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let pool = state.db.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        ledger_events::read_activity(pool, &options),
+    )
+    .await
+    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+    .map_err(|error| match error {
+        ledger_events::JournalError::InvalidPage | ledger_events::JournalError::InvalidContract => {
+            StatusCode::BAD_REQUEST
+        }
+        _ => StatusCode::SERVICE_UNAVAILABLE,
+    })
+    .map(Json)
 }
 
 /// Explain the public observer database gate without exposing credentials,
@@ -1076,163 +1446,197 @@ async fn observer_activity(
 /// This endpoint checks SQLx metadata, not the worker process itself.
 #[derive(Serialize)]
 struct ObserverSchemaReport {
- schema_version:u8,
- network:&'static str,
- source:&'static str,
- schema_status:&'static str,
- registered_migrations:Option<i64>,
- required_migrations:usize,
- payment_execution_enabled:bool,
- fee_collection_enabled:bool,
+    schema_version: u8,
+    network: &'static str,
+    source: &'static str,
+    schema_status: &'static str,
+    registered_migrations: Option<i64>,
+    required_migrations: usize,
+    payment_execution_enabled: bool,
+    fee_collection_enabled: bool,
 }
-fn observer_schema_projection(configured:bool,registered:Option<i64>,ready:bool)->ObserverSchemaReport{
- let status=if !configured{"not-configured"}
-  else if registered.is_none(){"unavailable"}
-  else if registered!=Some(REQUIRED_SCHEMA_VERSIONS.len() as i64){"migrations-pending"}
-  else if ready{"current"}else{"schema-incomplete"};
- ObserverSchemaReport{
-  schema_version:1,network:"testnet",source:"postgresql-sqlx-migrations",
-  schema_status:status,registered_migrations:registered,
-  required_migrations:REQUIRED_SCHEMA_VERSIONS.len(),
-  payment_execution_enabled:false,fee_collection_enabled:false,
- }
+fn observer_schema_projection(
+    configured: bool,
+    registered: Option<i64>,
+    ready: bool,
+) -> ObserverSchemaReport {
+    let status = if !configured {
+        "not-configured"
+    } else if registered.is_none() {
+        "unavailable"
+    } else if registered != Some(REQUIRED_SCHEMA_VERSIONS.len() as i64) {
+        "migrations-pending"
+    } else if ready {
+        "current"
+    } else {
+        "schema-incomplete"
+    };
+    ObserverSchemaReport {
+        schema_version: 1,
+        network: "testnet",
+        source: "postgresql-sqlx-migrations",
+        schema_status: status,
+        registered_migrations: registered,
+        required_migrations: REQUIRED_SCHEMA_VERSIONS.len(),
+        payment_execution_enabled: false,
+        fee_collection_enabled: false,
+    }
 }
-async fn observer_schema(State(state):State<Arc<AppState>>)->Json<ObserverSchemaReport>{
- let Some(pool)=state.db.as_ref() else{
-  return Json(observer_schema_projection(false,None,false));
- };
- // A successful TCP connection is insufficient. The exact audited migration
- // IDs and required relations must both pass before reporting current schema.
- let registered=tokio::time::timeout(Duration::from_secs(3),
+async fn observer_schema(State(state): State<Arc<AppState>>) -> Json<ObserverSchemaReport> {
+    let Some(pool) = state.db.as_ref() else {
+        return Json(observer_schema_projection(false, None, false));
+    };
+    // A successful TCP connection is insufficient. The exact audited migration
+    // IDs and required relations must both pass before reporting current schema.
+    let registered=tokio::time::timeout(Duration::from_secs(3),
   sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM _sqlx_migrations WHERE success = TRUE AND version = ANY($1::bigint[])")
    .bind(REQUIRED_SCHEMA_VERSIONS.as_slice()).fetch_one(pool)
  ).await.ok().and_then(Result::ok);
- let ready=if registered==Some(REQUIRED_SCHEMA_VERSIONS.len() as i64){
-  database_schema_ready(pool).await
- }else{false};
- Json(observer_schema_projection(true,registered,ready))
+    let ready = if registered == Some(REQUIRED_SCHEMA_VERSIONS.len() as i64) {
+        database_schema_ready(pool).await
+    } else {
+        false
+    };
+    Json(observer_schema_projection(true, registered, ready))
 }
 
 /// Must be enabled explicitly with STEALTHBRIDGE_ENABLE_LEDGER_OBSERVER=true.
 /// Run one designated observer per environment to avoid redundant RPC polling.
-pub async fn run_ledger_observer(state:AppState) {
+pub async fn run_ledger_observer(state: AppState) {
     use sqlx::Connection;
-    let Some(pool)=state.db.clone() else {
+    let Some(pool) = state.db.clone() else {
         warn!("Read-only ledger worker cannot start without PostgreSQL");
         return;
     };
     // Dedicated session connection: advisory locks must never leak into a pool.
-    let Ok(database_url)=env::var("DATABASE_URL") else {
+    let Ok(database_url) = env::var("DATABASE_URL") else {
         warn!("Read-only ledger worker requires DATABASE_URL");
         return;
     };
-    let configured_events=match env::var("STEALTHBRIDGE_OBSERVER_CONTRACTS"){
-        Ok(raw)=>match ledger_events::configured_contracts(&raw){
-            Ok(ids)=>ids,
-            Err(_)=>{
+    let configured_events = match env::var("STEALTHBRIDGE_OBSERVER_CONTRACTS") {
+        Ok(raw) => match ledger_events::configured_contracts(&raw) {
+            Ok(ids) => ids,
+            Err(_) => {
                 warn!("Invalid public Testnet observer contract ID configuration; worker stopped");
                 return;
             }
         },
-        Err(_)=>Vec::new(),
+        Err(_) => Vec::new(),
     };
-    let bootstrap_start=if configured_events.is_empty(){
+    let bootstrap_start = if configured_events.is_empty() {
         0
-    }else{
-        let parsed=env::var("STEALTHBRIDGE_OBSERVER_START_LEDGER")
-            .ok().and_then(|value|value.parse::<u64>().ok())
-            .filter(|value|*value>0&&*value<=i64::MAX as u64);
-        match parsed{
-            Some(value)=>value,
-            None=>{
+    } else {
+        let parsed = env::var("STEALTHBRIDGE_OBSERVER_START_LEDGER")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0 && *value <= i64::MAX as u64);
+        match parsed {
+            Some(value) => value,
+            None => {
                 warn!("Explicit positive observer bootstrap ledger required; cannot skip event history");
                 return;
             }
         }
     };
     loop {
-        let mut lease_connection=match sqlx::PgConnection::connect(&database_url).await {
-            Ok(connection)=>connection,
-            Err(_)=>{
+        let mut lease_connection = match sqlx::PgConnection::connect(&database_url).await {
+            Ok(connection) => connection,
+            Err(_) => {
                 warn!("Ledger worker cannot establish dedicated lease connection");
                 tokio::time::sleep(Duration::from_secs(15)).await;
                 continue;
             }
         };
         match ledger::try_observer_lease(&mut lease_connection).await {
-            Ok(true)=>{},
-            Ok(false)=>{
+            Ok(true) => {}
+            Ok(false) => {
                 // Another durable worker owns the lock. Never poll or write.
                 tokio::time::sleep(Duration::from_secs(15)).await;
                 continue;
             }
-            Err(_)=>{
+            Err(_) => {
                 warn!("Ledger worker could not validate exclusive lease");
                 tokio::time::sleep(Duration::from_secs(15)).await;
                 continue;
             }
         }
-        let mut interval=tokio::time::interval(Duration::from_secs(15));
+        let mut interval = tokio::time::interval(Duration::from_secs(15));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
             // The active lease remains valid only while this private session
             // responds. A failed heartbeat halts the writer and reconnects.
-            if sqlx::query_scalar::<_,i32>("SELECT 1")
-                .fetch_one(&mut lease_connection).await.is_err() {
+            if sqlx::query_scalar::<_, i32>("SELECT 1")
+                .fetch_one(&mut lease_connection)
+                .await
+                .is_err()
+            {
                 warn!("Ledger worker lost its database lease heartbeat; pausing observation");
                 break;
             }
             match state.network().await {
-                Ok(status)=>{
-                    let head=VerifiedHead{
-                        passphrase:status.passphrase,
-                        ledger_sequence:status.ledger_sequence,
-                        ledger_hash:status.ledger_hash,
-                        ledger_closed_at_unix:status.ledger_closed_at_unix,
+                Ok(status) => {
+                    let head = VerifiedHead {
+                        passphrase: status.passphrase,
+                        ledger_sequence: status.ledger_sequence,
+                        ledger_hash: status.ledger_hash,
+                        ledger_closed_at_unix: status.ledger_closed_at_unix,
                     };
-                    if let Err(error)=ledger::record_head(&pool,&head).await {
+                    if let Err(error) = ledger::record_head(&pool, &head).await {
                         warn!(error=?error,"Ledger checkpoint rejected or storage unavailable");
                         continue;
                     }
                     // When no contract addresses are explicitly provisioned,
                     // preserve head-only read observability and never invent
                     // contract IDs from an undeployed source manifest.
-                    for contract_id in &configured_events{
-                        let progress=match ledger_events::load_progress(&pool,contract_id,bootstrap_start).await{
-                            Ok(value)=>value,
-                            Err(error)=>{
+                    for contract_id in &configured_events {
+                        let progress = match ledger_events::load_progress(
+                            &pool,
+                            contract_id,
+                            bootstrap_start,
+                        )
+                        .await
+                        {
+                            Ok(value) => value,
+                            Err(error) => {
                                 warn!(error=?error,"Event cursor unavailable; no public event data recorded");
                                 continue;
                             }
                         };
-                        let params=match ledger_events::rpc_params(contract_id,&progress){
-                            Ok(value)=>value,
-                            Err(_)=>{
+                        let params = match ledger_events::rpc_params(contract_id, &progress) {
+                            Ok(value) => value,
+                            Err(_) => {
                                 warn!("Configured event cursor was invalid");
                                 continue;
                             }
                         };
-                        let result=match state.rpc_with_params("getEvents",Some(params)).await{
-                            Ok(value)=>value,
-                            Err(_)=>{
+                        let result = match state.rpc_with_params("getEvents", Some(params)).await {
+                            Ok(value) => value,
+                            Err(_) => {
                                 warn!("Bounded Stellar getEvents request unavailable; public cursor preserved");
                                 continue;
                             }
                         };
-                        match ledger_events::parse_events(&result,contract_id,&progress){
-                            Ok(page)=>{
-                                if let Err(error)=ledger_events::record_event_page(
-                                    &pool,contract_id,&progress,&page,
-                                ).await{
+                        match ledger_events::parse_events(&result, contract_id, &progress) {
+                            Ok(page) => {
+                                if let Err(error) = ledger_events::record_event_page(
+                                    &pool,
+                                    contract_id,
+                                    &progress,
+                                    &page,
+                                )
+                                .await
+                                {
                                     warn!(error=?error,"Event journal rejected page; cursor unchanged");
                                 }
                             }
-                            Err(error)=>warn!(error=?error,"Unverified/pruned event page; manual recovery required"),
+                            Err(error) => {
+                                warn!(error=?error,"Unverified/pruned event page; manual recovery required")
+                            }
                         }
                     }
                 }
-                Err(_)=>warn!("Stellar Testnet observer could not verify upstream RPC"),
+                Err(_) => warn!("Stellar Testnet observer could not verify upstream RPC"),
             }
         }
         // Dropping the dedicated session releases any remaining advisory lock.
@@ -1245,9 +1649,17 @@ pub async fn run_ledger_observer(state:AppState) {
 /// operator-run SQLx migrations. A successful TCP/SELECT 1 alone is not
 /// sufficient: the runtime must have its catalog and internal safeguards.
 const REQUIRED_SCHEMA_VERSIONS: [i64; 12] = [
-    202610080001, 202610080002, 202610080003, 202610080004,
-    202610080005, 202610080006, 202610100001,
-    202610130001, 202610130002, 202610150001, 202610210001,
+    202610080001,
+    202610080002,
+    202610080003,
+    202610080004,
+    202610080005,
+    202610080006,
+    202610100001,
+    202610130001,
+    202610130002,
+    202610150001,
+    202610210001,
     202610270001,
 ];
 
@@ -1349,10 +1761,9 @@ async fn dependency_diagnostics(
 
 /// Ledger heads are freshness-bound independently of RPC HTTP liveness.
 /// A small future-clock allowance tolerates upstream timestamp/clock skew.
-fn ledger_is_fresh(closed_at_unix:&str, now:u64, max_age_secs:u64)->bool {
+fn ledger_is_fresh(closed_at_unix: &str, now: u64, max_age_secs: u64) -> bool {
     closed_at_unix.parse::<u64>().is_ok_and(|closed_at| {
-        closed_at <= now.saturating_add(30) &&
-        now.saturating_sub(closed_at) <= max_age_secs
+        closed_at <= now.saturating_add(30) && now.saturating_sub(closed_at) <= max_age_secs
     })
 }
 
@@ -1363,124 +1774,232 @@ struct Readiness {
     database: &'static str,
     payments: &'static str,
 }
-fn readiness_projection(chain:bool,db_configured:bool,db_available:bool)->Readiness{
-    let database=if !db_configured{"not-configured"}else if db_available{"connected"}else{"unavailable"};
-    let ready=chain&&database=="connected";
-    Readiness{status:if ready{"ready"}else{"degraded"},
-        stellar_rpc:if chain{"connected"}else{"unavailable"},database,payments:"disabled"}
+fn readiness_projection(chain: bool, db_configured: bool, db_available: bool) -> Readiness {
+    let database = if !db_configured {
+        "not-configured"
+    } else if db_available {
+        "connected"
+    } else {
+        "unavailable"
+    };
+    let ready = chain && database == "connected";
+    Readiness {
+        status: if ready { "ready" } else { "degraded" },
+        stellar_rpc: if chain { "connected" } else { "unavailable" },
+        database,
+        payments: "disabled",
+    }
 }
 /// Non-custodial readiness observation: healthy process != usable payment rail.
-async fn readiness(State(state):State<Arc<AppState>>)
-    ->(StatusCode,Json<Readiness>){
+async fn readiness(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Readiness>) {
     // Parallel bounded checks reduce the load balancer's worst-case wait.
-    let rpc_probe=async {
-        let started=Instant::now();
-        let result=state.network().await;
-        (result,started.elapsed())
+    let rpc_probe = async {
+        let started = Instant::now();
+        let result = state.network().await;
+        (result, started.elapsed())
     };
-    let ((chain_result,rpc_latency), db_result) = tokio::join!(
-        rpc_probe,
-        async {
-            match &state.db {
-                Some(pool) => database_schema_ready(pool).await,
-                None => false,
-            }
+    let ((chain_result, rpc_latency), db_result) = tokio::join!(rpc_probe, async {
+        match &state.db {
+            Some(pool) => database_schema_ready(pool).await,
+            None => false,
         }
-    );
-    let now = SystemTime::now().duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs()).unwrap_or(0);
+    });
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
     // A responsive RPC with an old ledger is not a healthy observer.
-    let ledger_age=chain_result.as_ref().ok().and_then(|head|head.ledger_closed_at_unix.parse::<u64>().ok())
-        .filter(|closed_at|*closed_at<=now.saturating_add(30)).map(|closed_at|now.saturating_sub(closed_at));
-    let chain = chain_result.is_ok_and(|head| ledger_is_fresh(&head.ledger_closed_at_unix, now, 180));
-    let db_configured=state.db.is_some();
-    state.metrics.rpc_probes_total.fetch_add(1,Ordering::Relaxed);
-    if !chain {state.metrics.rpc_probe_errors_total.fetch_add(1,Ordering::Relaxed);}
-    state.metrics.rpc_probe_latency_ms_sum.fetch_add(rpc_latency.as_millis().min(u64::MAX as u128) as u64,Ordering::Relaxed);
-    state.metrics.ledger_age_seconds.store(ledger_age.unwrap_or(u64::MAX),Ordering::Relaxed);
-    state.metrics.database_configured.store(db_configured,Ordering::Relaxed);
-    state.metrics.database_available.store(db_result,Ordering::Relaxed);
-    let result=readiness_projection(chain,db_configured,db_result);
-    let status=if result.status=="ready"{StatusCode::OK}else{StatusCode::SERVICE_UNAVAILABLE};
-    (status,Json(result))
+    let ledger_age = chain_result
+        .as_ref()
+        .ok()
+        .and_then(|head| head.ledger_closed_at_unix.parse::<u64>().ok())
+        .filter(|closed_at| *closed_at <= now.saturating_add(30))
+        .map(|closed_at| now.saturating_sub(closed_at));
+    let chain =
+        chain_result.is_ok_and(|head| ledger_is_fresh(&head.ledger_closed_at_unix, now, 180));
+    let db_configured = state.db.is_some();
+    state
+        .metrics
+        .rpc_probes_total
+        .fetch_add(1, Ordering::Relaxed);
+    if !chain {
+        state
+            .metrics
+            .rpc_probe_errors_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    state.metrics.rpc_probe_latency_ms_sum.fetch_add(
+        rpc_latency.as_millis().min(u64::MAX as u128) as u64,
+        Ordering::Relaxed,
+    );
+    state
+        .metrics
+        .ledger_age_seconds
+        .store(ledger_age.unwrap_or(u64::MAX), Ordering::Relaxed);
+    state
+        .metrics
+        .database_configured
+        .store(db_configured, Ordering::Relaxed);
+    state
+        .metrics
+        .database_available
+        .store(db_result, Ordering::Relaxed);
+    let result = readiness_projection(chain, db_configured, db_result);
+    let status = if result.status == "ready" {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (status, Json(result))
 }
 
-fn safe_error(status:StatusCode)->(&'static str,&'static str){
-    match status{
-        StatusCode::BAD_REQUEST=>("INVALID_REQUEST","The request parameters are invalid."),
-        StatusCode::UNAUTHORIZED|StatusCode::FORBIDDEN=>("UNAUTHORIZED","The request is not authorized."),
-        StatusCode::NOT_FOUND=>("NOT_FOUND","The requested resource was not found."),
-        StatusCode::TOO_MANY_REQUESTS=>("RATE_LIMITED","Too many requests. Retry after a short delay."),
-        StatusCode::BAD_GATEWAY=>("UPSTREAM_UNAVAILABLE","The upstream service returned an invalid or unavailable response."),
-        StatusCode::SERVICE_UNAVAILABLE=>("DEPENDENCY_UNAVAILABLE","A required service is unavailable or not configured."),
-        StatusCode::NOT_IMPLEMENTED=>("FEATURE_DISABLED","This operation is not enabled. No transaction was submitted."),
-        _=>("REQUEST_FAILED","The request could not be completed."),
+fn safe_error(status: StatusCode) -> (&'static str, &'static str) {
+    match status {
+        StatusCode::BAD_REQUEST => ("INVALID_REQUEST", "The request parameters are invalid."),
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+            ("UNAUTHORIZED", "The request is not authorized.")
+        }
+        StatusCode::NOT_FOUND => ("NOT_FOUND", "The requested resource was not found."),
+        StatusCode::TOO_MANY_REQUESTS => (
+            "RATE_LIMITED",
+            "Too many requests. Retry after a short delay.",
+        ),
+        StatusCode::BAD_GATEWAY => (
+            "UPSTREAM_UNAVAILABLE",
+            "The upstream service returned an invalid or unavailable response.",
+        ),
+        StatusCode::SERVICE_UNAVAILABLE => (
+            "DEPENDENCY_UNAVAILABLE",
+            "A required service is unavailable or not configured.",
+        ),
+        StatusCode::NOT_IMPLEMENTED => (
+            "FEATURE_DISABLED",
+            "This operation is not enabled. No transaction was submitted.",
+        ),
+        _ => ("REQUEST_FAILED", "The request could not be completed."),
     }
 }
 #[derive(Serialize)]
-struct ErrorDetails {code:&'static str,message:&'static str}
+struct ErrorDetails {
+    code: &'static str,
+    message: &'static str,
+}
 #[derive(Serialize)]
-struct ErrorEnvelope {error:ErrorDetails,trace_id:String,#[serde(skip_serializing_if="Option::is_none")]details:Option<Value>}
+struct ErrorEnvelope {
+    error: ErrorDetails,
+    trace_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<Value>,
+}
 
-async fn diagnostic_responses(request:Request<Body>,next:Next)->Response{
-    let path=request.uri().path().to_owned();
-    let response=next.run(request).await;
-    let trace_id=Uuid::new_v4().to_string();
-    let status=response.status();
-    let (mut parts,body)=response.into_parts();
-    let response=if status.is_client_error()||status.is_server_error(){
-        let details=if path=="/ready"&&status==StatusCode::SERVICE_UNAVAILABLE{
-            to_bytes(body,64*1024).await.ok().and_then(|bytes|serde_json::from_slice(&bytes).ok())
-        }else{None};
-        let (code,message)=safe_error(status);
-        let envelope=ErrorEnvelope{error:ErrorDetails{code,message},trace_id:trace_id.clone(),details};
-        let payload=serde_json::to_vec(&envelope).unwrap_or_else(|_|b"{}".to_vec());
+async fn diagnostic_responses(request: Request<Body>, next: Next) -> Response {
+    let path = request.uri().path().to_owned();
+    let response = next.run(request).await;
+    let trace_id = Uuid::new_v4().to_string();
+    let status = response.status();
+    let (mut parts, body) = response.into_parts();
+    let response = if status.is_client_error() || status.is_server_error() {
+        let details = if path == "/ready" && status == StatusCode::SERVICE_UNAVAILABLE {
+            to_bytes(body, 64 * 1024)
+                .await
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        } else {
+            None
+        };
+        let (code, message) = safe_error(status);
+        let envelope = ErrorEnvelope {
+            error: ErrorDetails { code, message },
+            trace_id: trace_id.clone(),
+            details,
+        };
+        let payload = serde_json::to_vec(&envelope).unwrap_or_else(|_| b"{}".to_vec());
         parts.headers.remove(header::CONTENT_LENGTH);
         parts.headers.remove(header::CONTENT_ENCODING);
-        parts.headers.insert(header::CONTENT_TYPE,HeaderValue::from_static("application/json"));
-        parts.headers.insert("x-error-code",HeaderValue::from_static(code));
+        parts.headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        parts
+            .headers
+            .insert("x-error-code", HeaderValue::from_static(code));
         warn!(trace_id=%trace_id,status=status.as_u16(),"Public API request failed");
-        Response::from_parts(parts,Body::from(payload))
-    }else{Response::from_parts(parts,body)};
-    let mut response=response;
-    response.headers_mut().insert("x-request-id",HeaderValue::from_str(&trace_id).expect("UUID is a valid header value"));
+        Response::from_parts(parts, Body::from(payload))
+    } else {
+        Response::from_parts(parts, body)
+    };
+    let mut response = response;
+    response.headers_mut().insert(
+        "x-request-id",
+        HeaderValue::from_str(&trace_id).expect("UUID is a valid header value"),
+    );
     // The backend is a service API, never an indexed public destination.
     // This discourages search engine indexing but is NOT authentication.
-    response.headers_mut().insert("x-robots-tag",HeaderValue::from_static("noindex, nofollow, noarchive"));
+    response.headers_mut().insert(
+        "x-robots-tag",
+        HeaderValue::from_static("noindex, nofollow, noarchive"),
+    );
     // A contract instance is a time-sensitive public ledger observation, not
     // stable account identity. Never let intermediaries reuse stale presence.
-    if path == "/v1/wallet/smart-account-kit" || path.starts_with("/v1/wallet/contracts/") || path.starts_with("/v1/wallet/recipient/") || path.starts_with("/v1/wallet/classic-recipient/") {
-        response.headers_mut().insert(header::CACHE_CONTROL,HeaderValue::from_static("no-store"));
+    if path == "/v1/wallet/smart-account-kit"
+        || path.starts_with("/v1/wallet/contracts/")
+        || path.starts_with("/v1/wallet/recipient/")
+        || path.starts_with("/v1/wallet/classic-recipient/")
+    {
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     }
     response
 }
 
-fn token_matches(expected:&str,provided:&str)->bool{
-    if expected.len()!=provided.len(){return false;}
-    expected.bytes().zip(provided.bytes()).fold(0u8,|difference,(left,right)|difference|(left^right))==0
+fn token_matches(expected: &str, provided: &str) -> bool {
+    if expected.len() != provided.len() {
+        return false;
+    }
+    expected
+        .bytes()
+        .zip(provided.bytes())
+        .fold(0u8, |difference, (left, right)| difference | (left ^ right))
+        == 0
 }
-async fn internal_metrics(State(state):State<Arc<AppState>>,headers:axum::http::HeaderMap)
-    ->Result<(StatusCode,[(header::HeaderName,HeaderValue);1],String),StatusCode>{
-    let token=state.metrics_token.as_deref().ok_or(StatusCode::NOT_FOUND)?;
-    let supplied=headers.get(header::AUTHORIZATION).and_then(|value|value.to_str().ok())
-        .and_then(|value|value.strip_prefix("Bearer ")).ok_or(StatusCode::UNAUTHORIZED)?;
-    if !token_matches(token,supplied){return Err(StatusCode::UNAUTHORIZED);}
-    let metrics=&state.metrics;
-    let age=metrics.ledger_age_seconds.load(Ordering::Relaxed);
-    let age_line=if age==u64::MAX{String::new()}else{format!("stealthbridge_observed_ledger_age_seconds {age}\n")};
-    let db_configured=u8::from(metrics.database_configured.load(Ordering::Relaxed));
-    let db_available=u8::from(metrics.database_available.load(Ordering::Relaxed));
+async fn internal_metrics(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> Result<(StatusCode, [(header::HeaderName, HeaderValue); 1], String), StatusCode> {
+    let token = state
+        .metrics_token
+        .as_deref()
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let supplied = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    if !token_matches(token, supplied) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let metrics = &state.metrics;
+    let age = metrics.ledger_age_seconds.load(Ordering::Relaxed);
+    let age_line = if age == u64::MAX {
+        String::new()
+    } else {
+        format!("stealthbridge_observed_ledger_age_seconds {age}\n")
+    };
+    let db_configured = u8::from(metrics.database_configured.load(Ordering::Relaxed));
+    let db_available = u8::from(metrics.database_available.load(Ordering::Relaxed));
     let mut body=format!("# HELP stealthbridge_readiness_rpc_probes_total Readiness RPC probes.\n# TYPE stealthbridge_readiness_rpc_probes_total counter\nstealthbridge_readiness_rpc_probes_total {}\n# HELP stealthbridge_readiness_rpc_probe_errors_total Failed readiness RPC probes.\n# TYPE stealthbridge_readiness_rpc_probe_errors_total counter\nstealthbridge_readiness_rpc_probe_errors_total {}\n# HELP stealthbridge_readiness_rpc_probe_latency_ms_sum Cumulative readiness RPC probe latency in milliseconds.\n# TYPE stealthbridge_readiness_rpc_probe_latency_ms_sum counter\nstealthbridge_readiness_rpc_probe_latency_ms_sum {}\n# HELP stealthbridge_database_configured Whether PostgreSQL is configured.\n# TYPE stealthbridge_database_configured gauge\nstealthbridge_database_configured {db_configured}\n# HELP stealthbridge_database_available Whether configured PostgreSQL is reachable.\n# TYPE stealthbridge_database_available gauge\nstealthbridge_database_available {db_available}\n# HELP stealthbridge_observed_ledger_age_seconds Age of the latest verified Testnet ledger head.\n# TYPE stealthbridge_observed_ledger_age_seconds gauge\n{age_line}# HELP stealthbridge_journal_transitions_total Public journal transitions; no public transition API is enabled.\n# TYPE stealthbridge_journal_transitions_total counter\nstealthbridge_journal_transitions_total 0\n",
         metrics.rpc_probes_total.load(Ordering::Relaxed),metrics.rpc_probe_errors_total.load(Ordering::Relaxed),
         metrics.rpc_probe_latency_ms_sum.load(Ordering::Relaxed));
-    if let Some(pool)=state.db.as_ref(){
+    if let Some(pool) = state.db.as_ref() {
         // Auth check above precedes all SQL. Bound the read-only diagnostic
         // query so an unhealthy/oversized event journal cannot hang a
         // metrics scrape. Do not fake zero metrics when PostgreSQL is down.
-        let snapshot=tokio::time::timeout(Duration::from_secs(2),
-            ledger_events::diagnostics(pool)).await
-            .map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?
-            .map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?;
+        let snapshot =
+            tokio::time::timeout(Duration::from_secs(2), ledger_events::diagnostics(pool))
+                .await
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
         body.push_str(&format!(
           "# HELP stealthbridge_observer_contracts_tracked Configured Testnet observer cursors.\n\
            # TYPE stealthbridge_observer_contracts_tracked gauge\n\
@@ -1489,9 +2008,10 @@ async fn internal_metrics(State(state):State<Arc<AppState>>,headers:axum::http::
            # TYPE stealthbridge_observer_public_events_stored gauge\n\
            stealthbridge_observer_public_events_stored {}\n",
           snapshot.tracked_contracts,snapshot.public_event_rows));
-        if let (Some(age),Some(sequence))=(
-           snapshot.oldest_cursor_age_seconds,snapshot.earliest_resume_ledger
-        ){
+        if let (Some(age), Some(sequence)) = (
+            snapshot.oldest_cursor_age_seconds,
+            snapshot.earliest_resume_ledger,
+        ) {
             body.push_str(&format!(
              "# HELP stealthbridge_observer_oldest_cursor_age_seconds Age of least recently updated cursor.\n\
               # TYPE stealthbridge_observer_oldest_cursor_age_seconds gauge\n\
@@ -1501,36 +2021,61 @@ async fn internal_metrics(State(state):State<Arc<AppState>>,headers:axum::http::
               stealthbridge_observer_earliest_resume_ledger {sequence}\n"));
         }
     }
-    Ok((StatusCode::OK,[(header::CONTENT_TYPE,HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"))],body))
+    Ok((
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
+        )],
+        body,
+    ))
 }
 
 /// Authenticated, tenant-bound, read-only review count. Never exposes a
 /// reviewer, a payment instruction, signature, or proof witness.
 async fn business_review_status(
-    State(state):State<Arc<AppState>>,
-    Path((organization,request_id)):Path<(Uuid,Uuid)>,
-    headers:HeaderMap,
-)->Response {
-    let (Some(pool),Some(domain),Some(secret))=(
-        state.db.as_ref(),state.session_domain.as_ref(),state.session_secret.as_ref()
-    ) else {return StatusCode::SERVICE_UNAVAILABLE.into_response();};
-    let Some(bearer)=headers.get(header::AUTHORIZATION).and_then(|h|h.to_str().ok())
-        .filter(|v|v.len()<=2048) else {
+    State(state): State<Arc<AppState>>,
+    Path((organization, request_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Response {
+    let (Some(pool), Some(domain), Some(secret)) = (
+        state.db.as_ref(),
+        state.session_domain.as_ref(),
+        state.session_secret.as_ref(),
+    ) else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let Some(bearer) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .filter(|v| v.len() <= 2048)
+    else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    let now=SystemTime::now().duration_since(UNIX_EPOCH)
-        .map(|d|d.as_secs() as i64).unwrap_or(0);
-    let identity=org_auth::require_read_identity(
-        pool,bearer,secret.as_ref(),domain,organization,Permission::ReadAudit,now
-    ).await;
-    let identity=match identity {
-        Ok(value)=>value,
-        Err(org_auth::AuthError::Database(_))=>return StatusCode::SERVICE_UNAVAILABLE.into_response(),
-        Err(_)=>return StatusCode::UNAUTHORIZED.into_response(),
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let identity = org_auth::require_read_identity(
+        pool,
+        bearer,
+        secret.as_ref(),
+        domain,
+        organization,
+        Permission::ReadAudit,
+        now,
+    )
+    .await;
+    let identity = match identity {
+        Ok(value) => value,
+        Err(org_auth::AuthError::Database(_)) => {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response()
+        }
+        Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
     };
-    match business_reviews::read_review_count(pool,&identity,request_id).await {
-        Ok(review)=>(
-            [(header::CACHE_CONTROL,HeaderValue::from_static("no-store"))],
+    match business_reviews::read_review_count(pool, &identity, request_id).await {
+        Ok(review) => (
+            [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
             Json(json!({
                 "organization":organization,"request_id":request_id,
                 "review_count":review.count,"remaining_reviewers":review.remaining,
@@ -1538,69 +2083,121 @@ async fn business_review_status(
                 "financial_execution_authorized":false,
                 "signatures_verified":false,
                 "source":"tenant-review-journal"
-            }))
-        ).into_response(),
-        Err(business_reviews::ReviewStoreError::NotFound)=>StatusCode::NOT_FOUND.into_response(),
-        Err(business_reviews::ReviewStoreError::Unauthorized)=>StatusCode::UNAUTHORIZED.into_response(),
-        Err(_)=>StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            })),
+        )
+            .into_response(),
+        Err(business_reviews::ReviewStoreError::NotFound) => StatusCode::NOT_FOUND.into_response(),
+        Err(business_reviews::ReviewStoreError::Unauthorized) => {
+            StatusCode::UNAUTHORIZED.into_response()
+        }
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
 }
 
 pub fn router(state: AppState) -> Router {
-    let state=Arc::new(state);
+    let state = Arc::new(state);
     Router::new()
-        .route("/",get(api_home))
-        .route("/v1",get(api_directory))
-        .route("/health",get(health))
-        .route("/ready",get(readiness))
-        .route("/v1/diagnostics",get(dependency_diagnostics))
-        .route("/internal/metrics",get(internal_metrics))
-        .route("/v1/network",get(network))
-        .route("/v1/account/instructions", get(crate::payment_instructions::get).put(crate::payment_instructions::put).post(crate::payment_instructions::post).layer(axum::extract::DefaultBodyLimit::max(6000)))
-        .route("/v1/account/directory",get(crate::account_directory::account_directory))
-        .route("/v1/account/organizations/{id}/team",
-            get(crate::organization_team::get_organization_team))
-        .route("/v1/account/team-invites",
+        .route("/", get(api_home))
+        .route("/v1", get(api_directory))
+        .route("/health", get(health))
+        .route("/ready", get(readiness))
+        .route("/v1/diagnostics", get(dependency_diagnostics))
+        .route("/internal/metrics", get(internal_metrics))
+        .route("/v1/network", get(network))
+        .route(
+            "/v1/account/instructions",
+            get(crate::payment_instructions::get)
+                .put(crate::payment_instructions::put)
+                .post(crate::payment_instructions::post)
+                .layer(axum::extract::DefaultBodyLimit::max(6000)),
+        )
+        .route(
+            "/v1/account/settlements",
+            get(crate::settlement_lifecycle::get)
+                .put(crate::settlement_lifecycle::put)
+                .post(crate::settlement_lifecycle::post)
+                .layer(axum::extract::DefaultBodyLimit::max(8192)),
+        )
+        .route(
+            "/v1/account/directory",
+            get(crate::account_directory::account_directory),
+        )
+        .route(
+            "/v1/account/organizations/{id}/team",
+            get(crate::organization_team::get_organization_team),
+        )
+        .route(
+            "/v1/account/team-invites",
             get(crate::team_invites::get_invites)
-             .post(crate::team_invites::post_invites)
-             .layer(axum::extract::DefaultBodyLimit::max(400)))
-        .route("/v1/account/business-onboarding",
-          get(crate::business_onboarding::list_business_applications)
-          .post(crate::business_onboarding::create_business_application)
-          .patch(crate::business_onboarding::amend_business_application)
-          .delete(crate::business_onboarding::withdraw_business_application)
-          .layer(axum::extract::DefaultBodyLimit::max(512)))
-        .route("/v1/account/profile",get(crate::account_profile::get_profile)
-          .patch(crate::account_profile::patch_profile)
-          .layer(axum::extract::DefaultBodyLimit::max(1024)))
-        .route("/v1/account/drafts",get(crate::customer_ciphertext_vault::list)
-          .put(crate::customer_ciphertext_vault::put)
-          .delete(crate::customer_ciphertext_vault::delete)
-          .layer(axum::extract::DefaultBodyLimit::max(6000)))
-        .route("/v1/observer",get(observer_head))
-        .route("/v1/observer/activity",get(observer_activity))
-        .route("/v1/observer/schema",get(observer_schema))
-        .route("/v1/wallet/smart-account-kit",get(smart_account_kit))
-        .route("/v1/wallet/contracts/{address}",get(public_contract_instance))
-        .route("/v1/wallet/recipient/{address}",get(public_recipient_presence))
-        .route("/v1/wallet/classic-recipient/{address}",get(public_classic_recipient_presence))
-        .route("/v1/capabilities",get(capabilities))
-        .route("/v1/platform/modules",get(crate::platform::platform_modules))
-        .route("/v1/business/reviews/{organization}/{request_id}",get(business_review_status))
-        .route("/v1/contracts",get(contract_discovery))
-        .route("/v1/governance/release",get(governance_release))
-        .route("/v1/governance/code",get(governance_code))
-        .route("/v1/governance/admin",get(governance_admin))
-        .route("/v1/governance/snapshot",get(governance_snapshot))
-        .route("/v1/corridors",get(corridors))
-        .route("/v1/corridors/page",get(corridor_page))
-        .route("/v1/corridors/batch",get(corridor_batch))
-        .route("/v1/corridors/batch/preflight",get(corridor_batch_preflight))
-        .route("/v1/corridors/{id}",get(corridor_by_id))
-        .route("/v1/corridors/{id}/preflight",get(corridor_preflight))
-        .route("/v1/transactions/{hash}",get(public_transaction))
-        .route("/v1/settlements",post(disabled))
-        .layer(from_fn_with_state(Arc::clone(&state),limit_public_rpc_reads))
+                .post(crate::team_invites::post_invites)
+                .layer(axum::extract::DefaultBodyLimit::max(400)),
+        )
+        .route(
+            "/v1/account/business-onboarding",
+            get(crate::business_onboarding::list_business_applications)
+                .post(crate::business_onboarding::create_business_application)
+                .patch(crate::business_onboarding::amend_business_application)
+                .delete(crate::business_onboarding::withdraw_business_application)
+                .layer(axum::extract::DefaultBodyLimit::max(512)),
+        )
+        .route(
+            "/v1/account/profile",
+            get(crate::account_profile::get_profile)
+                .patch(crate::account_profile::patch_profile)
+                .layer(axum::extract::DefaultBodyLimit::max(1024)),
+        )
+        .route(
+            "/v1/account/drafts",
+            get(crate::customer_ciphertext_vault::list)
+                .put(crate::customer_ciphertext_vault::put)
+                .delete(crate::customer_ciphertext_vault::delete)
+                .layer(axum::extract::DefaultBodyLimit::max(6000)),
+        )
+        .route("/v1/observer", get(observer_head))
+        .route("/v1/observer/activity", get(observer_activity))
+        .route("/v1/observer/schema", get(observer_schema))
+        .route("/v1/wallet/smart-account-kit", get(smart_account_kit))
+        .route(
+            "/v1/wallet/contracts/{address}",
+            get(public_contract_instance),
+        )
+        .route(
+            "/v1/wallet/recipient/{address}",
+            get(public_recipient_presence),
+        )
+        .route(
+            "/v1/wallet/classic-recipient/{address}",
+            get(public_classic_recipient_presence),
+        )
+        .route("/v1/capabilities", get(capabilities))
+        .route(
+            "/v1/platform/modules",
+            get(crate::platform::platform_modules),
+        )
+        .route(
+            "/v1/business/reviews/{organization}/{request_id}",
+            get(business_review_status),
+        )
+        .route("/v1/contracts", get(contract_discovery))
+        .route("/v1/governance/release", get(governance_release))
+        .route("/v1/governance/code", get(governance_code))
+        .route("/v1/governance/admin", get(governance_admin))
+        .route("/v1/governance/snapshot", get(governance_snapshot))
+        .route("/v1/corridors", get(corridors))
+        .route("/v1/corridors/page", get(corridor_page))
+        .route("/v1/corridors/batch", get(corridor_batch))
+        .route(
+            "/v1/corridors/batch/preflight",
+            get(corridor_batch_preflight),
+        )
+        .route("/v1/corridors/{id}", get(corridor_by_id))
+        .route("/v1/corridors/{id}/preflight", get(corridor_preflight))
+        .route("/v1/transactions/{hash}", get(public_transaction))
+        .route("/v1/settlements", post(disabled))
+        .layer(from_fn_with_state(
+            Arc::clone(&state),
+            limit_public_rpc_reads,
+        ))
         .layer(from_fn(diagnostic_responses))
         .with_state(state)
 }
@@ -1651,57 +2248,100 @@ mod tests {
         let b = Uuid::new_v4();
         let raw = format!("{a},{b}");
         let ids = parse_corridor_batch_ids(&raw).unwrap();
-        assert_eq!(ids,[a,b]);
-        for bad in ["","none","not-a-uuid","00000000-0000-0000-0000-000000000000?amount=9"] {
-            assert_eq!(parse_corridor_batch_ids(bad),Err(StatusCode::BAD_REQUEST));
+        assert_eq!(ids, [a, b]);
+        for bad in [
+            "",
+            "none",
+            "not-a-uuid",
+            "00000000-0000-0000-0000-000000000000?amount=9",
+        ] {
+            assert_eq!(parse_corridor_batch_ids(bad), Err(StatusCode::BAD_REQUEST));
         }
-        assert_eq!(parse_corridor_batch_ids(&format!("{a},{a}")),Err(StatusCode::BAD_REQUEST));
-        assert_eq!(parse_corridor_batch_ids(&a.to_string().to_uppercase()),Err(StatusCode::BAD_REQUEST));
-        assert_eq!(parse_corridor_batch_ids(&format!("{a},{b},{a}")),Err(StatusCode::BAD_REQUEST));
-        assert_eq!(parse_corridor_batch_ids(&vec![a.to_string();9].join(",")),Err(StatusCode::BAD_REQUEST));
+        assert_eq!(
+            parse_corridor_batch_ids(&format!("{a},{a}")),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            parse_corridor_batch_ids(&a.to_string().to_uppercase()),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            parse_corridor_batch_ids(&format!("{a},{b},{a}")),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            parse_corridor_batch_ids(&vec![a.to_string(); 9].join(",")),
+            Err(StatusCode::BAD_REQUEST)
+        );
         let sample = Corridor {
-            id:b,origin_country:"NG".to_owned(),destination_country:"GH".to_owned(),
-            asset_code:"USDC".to_owned(),asset_issuer:None,
-            privacy_rail:"private-payments".to_owned()
+            id: b,
+            origin_country: "NG".to_owned(),
+            destination_country: "GH".to_owned(),
+            asset_code: "USDC".to_owned(),
+            asset_issuer: None,
+            privacy_rail: "private-payments".to_owned(),
         };
-        let incomplete = corridor_batch_response(ids.clone(),vec![sample.clone()]).unwrap();
+        let incomplete = corridor_batch_response(ids.clone(), vec![sample.clone()]).unwrap();
         let v = serde_json::to_value(incomplete).unwrap();
-        assert_eq!(v["requested_ids"][0],a.to_string());
-        assert_eq!(v["items"][0]["id"],b.to_string());
-        assert_eq!(v["missing_ids"][0],a.to_string());
-        assert_eq!(v["all_configured"],false);
-        for field in ["payment_execution_enabled","privacy_verified","fiat_payouts_enabled"] {
-            assert_eq!(v[field],false);
+        assert_eq!(v["requested_ids"][0], a.to_string());
+        assert_eq!(v["items"][0]["id"], b.to_string());
+        assert_eq!(v["missing_ids"][0], a.to_string());
+        assert_eq!(v["all_configured"], false);
+        for field in [
+            "payment_execution_enabled",
+            "privacy_verified",
+            "fiat_payouts_enabled",
+        ] {
+            assert_eq!(v[field], false);
         }
-        let complete = corridor_batch_response(vec![b],vec![sample]).unwrap();
+        let complete = corridor_batch_response(vec![b], vec![sample]).unwrap();
         assert!(complete.all_configured);
         assert!(!complete.payment_execution_enabled);
     }
     #[test]
-    fn batch_preflight_evidence_can_never_enable_money(){
-        let id=Uuid::new_v4();
-        let row=Corridor {
-           id,origin_country:"NG".to_owned(),destination_country:"GH".to_owned(),
-           asset_code:"USDC".to_owned(),asset_issuer:None,
-           privacy_rail:"private-payments".to_owned()
+    fn batch_preflight_evidence_can_never_enable_money() {
+        let id = Uuid::new_v4();
+        let row = Corridor {
+            id,
+            origin_country: "NG".to_owned(),
+            destination_country: "GH".to_owned(),
+            asset_code: "USDC".to_owned(),
+            asset_issuer: None,
+            privacy_rail: "private-payments".to_owned(),
         };
-        let batch=corridor_batch_response(vec![id],vec![row]).unwrap();
-        let ready=build_batch_preflight(batch,true,Some(123_456),true,1793200000);
-        let evidence=serde_json::to_value(&ready).unwrap();
-        assert_eq!(evidence["read_only_dependencies_ready"],true);
-        assert_eq!(evidence["batch"]["all_configured"],true);
-        assert_eq!(evidence["ledger_sequence"],123_456);
-        for flag in ["payment_execution_enabled","fee_quote_available",
-                     "liquidity_verified","issuer_verified","privacy_verified","fiat_payouts_enabled"] {
-           assert_eq!(evidence[flag],false);
+        let batch = corridor_batch_response(vec![id], vec![row]).unwrap();
+        let ready = build_batch_preflight(batch, true, Some(123_456), true, 1793200000);
+        let evidence = serde_json::to_value(&ready).unwrap();
+        assert_eq!(evidence["read_only_dependencies_ready"], true);
+        assert_eq!(evidence["batch"]["all_configured"], true);
+        assert_eq!(evidence["ledger_sequence"], 123_456);
+        for flag in [
+            "payment_execution_enabled",
+            "fee_quote_available",
+            "liquidity_verified",
+            "issuer_verified",
+            "privacy_verified",
+            "fiat_payouts_enabled",
+        ] {
+            assert_eq!(evidence[flag], false);
         }
-        let missing=build_batch_preflight(corridor_batch_response(vec![id],vec![]).unwrap(),
-                                          false,Some(123_456),false,1793200000);
+        let missing = build_batch_preflight(
+            corridor_batch_response(vec![id], vec![]).unwrap(),
+            false,
+            Some(123_456),
+            false,
+            1793200000,
+        );
         assert!(missing.ledger_sequence.is_none());
         assert!(!missing.batch.all_configured);
         assert!(!missing.read_only_dependencies_ready);
-        let degraded=build_batch_preflight(corridor_batch_response(vec![id],vec![]).unwrap(),
-                                          true,Some(123_456),false,1793200000);
+        let degraded = build_batch_preflight(
+            corridor_batch_response(vec![id], vec![]).unwrap(),
+            true,
+            Some(123_456),
+            false,
+            1793200000,
+        );
         assert!(!degraded.read_only_dependencies_ready);
     }
     #[test]
@@ -1718,8 +2358,14 @@ mod tests {
         let value = serde_json::to_value(&ready).unwrap();
         assert_eq!(value["read_only_dependencies_ready"], true);
         assert_eq!(value["ledger_sequence"], 12345);
-        for key in ["payment_execution_enabled","fee_quote_available",
-            "liquidity_verified","issuer_verified","privacy_verified","fiat_payouts_enabled"] {
+        for key in [
+            "payment_execution_enabled",
+            "fee_quote_available",
+            "liquidity_verified",
+            "issuer_verified",
+            "privacy_verified",
+            "fiat_payouts_enabled",
+        ] {
             assert_eq!(value[key], false, "{key} must fail closed");
         }
         let degraded = build_corridor_preflight(corridor(), false, Some(12345), true, 1793200000);
@@ -1729,251 +2375,498 @@ mod tests {
         assert!(!missing.read_only_dependencies_ready);
     }
     #[test]
-    fn public_dependency_diagnostics_never_claim_execution_or_hide_degradation(){
-        for state in ["ready","schema-incomplete","unreachable","not-configured"] {
-            let observed=dependency_diagnostic(true,state,1800000000);
-            assert_eq!(observed.read_only_ready,state=="ready");
+    fn public_dependency_diagnostics_never_claim_execution_or_hide_degradation() {
+        for state in [
+            "ready",
+            "schema-incomplete",
+            "unreachable",
+            "not-configured",
+        ] {
+            let observed = dependency_diagnostic(true, state, 1800000000);
+            assert_eq!(observed.read_only_ready, state == "ready");
             assert!(!observed.payment_execution_enabled);
             assert!(!observed.privacy_verified);
             assert!(!observed.fiat_payouts_enabled);
         }
-        assert!(!dependency_diagnostic(false,"ready",1800000000).read_only_ready);
+        assert!(!dependency_diagnostic(false, "ready", 1800000000).read_only_ready);
     }
     #[test]
-    fn classic_recipient_horizon_evidence_requires_matching_accounts(){
-      let key="GAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB7JZX";
-      assert_eq!(checked_horizon_account(&json!({"id":key,"account_id":key,"balances":[{"balance":"123"}]}),key),Ok(true));
-      for bad in [json!({"id":key}),json!({"id":key,"account_id":"GFAKE"}),
-        json!({"id":"GFAKE","account_id":key}),json!({})]{
-        assert!(checked_horizon_account(&bad,key).is_err());
-      }
-      assert!(checked_horizon_account(&json!({"id":key,"account_id":key}),"not-an-account").is_err());
+    fn classic_recipient_horizon_evidence_requires_matching_accounts() {
+        let key = "GAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB7JZX";
+        assert_eq!(
+            checked_horizon_account(
+                &json!({"id":key,"account_id":key,"balances":[{"balance":"123"}]}),
+                key
+            ),
+            Ok(true)
+        );
+        for bad in [
+            json!({"id":key}),
+            json!({"id":key,"account_id":"GFAKE"}),
+            json!({"id":"GFAKE","account_id":key}),
+            json!({}),
+        ] {
+            assert!(checked_horizon_account(&bad, key).is_err());
+        }
+        assert!(
+            checked_horizon_account(&json!({"id":key,"account_id":key}), "not-an-account").is_err()
+        );
     }
     #[tokio::test]
-    async fn classic_recipient_endpoint_is_get_only_and_cache_disabled(){
-      use tower::ServiceExt;
-      let app=router(AppState::without_db());
-      let uri="/v1/wallet/classic-recipient/invalid";
-      let wrong=app.clone().oneshot(Request::builder().uri(uri)
-        .body(Body::empty()).unwrap()).await.unwrap();
-      assert_eq!(wrong.status(),StatusCode::BAD_REQUEST);
-      assert_eq!(wrong.headers()[header::CACHE_CONTROL],"no-store");
-      let blocked=app.oneshot(Request::builder().method("POST").uri(uri)
-        .body(Body::empty()).unwrap()).await.unwrap();
-      assert_eq!(blocked.status(),StatusCode::METHOD_NOT_ALLOWED);
-    }
-    #[tokio::test]
-    async fn recipient_presence_is_get_only_and_rejects_unknown_addresses(){
+    async fn classic_recipient_endpoint_is_get_only_and_cache_disabled() {
         use tower::ServiceExt;
-        let app=router(AppState::without_db());
-        let uri="/v1/wallet/recipient/not-a-contract";
-        let wrong=app.clone().oneshot(Request::builder().uri(uri)
-            .body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(wrong.status(),StatusCode::BAD_REQUEST);
-        assert_eq!(wrong.headers()[header::CACHE_CONTROL],"no-store");
-        let blocked=app.oneshot(Request::builder().method("POST").uri(uri)
-            .body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(blocked.status(),StatusCode::METHOD_NOT_ALLOWED);
+        let app = router(AppState::without_db());
+        let uri = "/v1/wallet/classic-recipient/invalid";
+        let wrong = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(wrong.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(wrong.headers()[header::CACHE_CONTROL], "no-store");
+        let blocked = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(blocked.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
     #[tokio::test]
-    async fn public_contract_inspection_is_get_only_uncacheable_and_strkey_validated(){
+    async fn recipient_presence_is_get_only_and_rejects_unknown_addresses() {
         use tower::ServiceExt;
-        let app=router(AppState::without_db());
-        let path="/v1/wallet/contracts/not-a-stellar-contract";
-        let invalid=app.clone().oneshot(Request::builder().uri(path)
-            .body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(invalid.status(),StatusCode::BAD_REQUEST);
-        assert_eq!(invalid.headers()[header::CACHE_CONTROL],"no-store");
-        let forbidden=app.oneshot(Request::builder().method("POST").uri(path)
-            .body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(forbidden.status(),StatusCode::METHOD_NOT_ALLOWED);
-        assert_eq!(forbidden.headers()[header::CACHE_CONTROL],"no-store");
+        let app = router(AppState::without_db());
+        let uri = "/v1/wallet/recipient/not-a-contract";
+        let wrong = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(wrong.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(wrong.headers()[header::CACHE_CONTROL], "no-store");
+        let blocked = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(blocked.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
     #[tokio::test]
-    async fn api_root_has_safe_html_and_json_discovery_without_exposing_operator_routes(){
+    async fn public_contract_inspection_is_get_only_uncacheable_and_strkey_validated() {
         use tower::ServiceExt;
-        let app=router(AppState::without_db());
-        let json_response=app.clone().oneshot(Request::builder().uri("/")
-            .header(header::ACCEPT,"application/json")
-            .body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(json_response.status(),StatusCode::OK);
-        assert_eq!(json_response.headers()["x-robots-tag"],"noindex, nofollow, noarchive");
-        assert_eq!(json_response.headers()[header::CACHE_CONTROL],"no-store");
-        let bytes=to_bytes(json_response.into_body(),8192).await.unwrap();
-        let directory:Value=serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(directory["network"],"testnet");
-        assert_eq!(directory["payment_execution_enabled"],false);
-        assert_eq!(directory["fee_collection_enabled"],false);
-        assert_eq!(directory["routes"]["process_health"],"/health");
-        let serialized=directory.to_string();
+        let app = router(AppState::without_db());
+        let path = "/v1/wallet/contracts/not-a-stellar-contract";
+        let invalid = app
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(invalid.headers()[header::CACHE_CONTROL], "no-store");
+        let forbidden = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(forbidden.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(forbidden.headers()[header::CACHE_CONTROL], "no-store");
+    }
+    #[tokio::test]
+    async fn protocol_30_muxed_recipient_route_boundaries() {
+        use tower::ServiceExt;
+        let app = router(AppState::without_db());
+        let w = "WDS6HBE6YJSZTRG3VR2HLCNHWJZMKB43BLFFEHEH3Z76WXAF46LW6AAAAAAAAAAAFKW6A";
+        let w_bad = "WDS6HBE6YJSZTRG3VR2HLCNHWJZMKB43BLFFEHEH3Z76WXAF46LW6AAAAAAAAAAAFKW6B";
+        let m = "MC3YRVLB7IN7SNUYVWFUC6OD3QWJXCUZ4HOBNIPVGY7BZDVOYMDNWAAAAAAAAAAAAGDYO";
+        let m_bad = "MAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB6EJCCD2H32MBCWAGR";
+        for bad_path in [
+            format!("/v1/wallet/contracts/{w}"),
+            format!("/v1/wallet/classic-recipient/{w}"),
+            format!("/v1/wallet/classic-recipient/{m_bad}"),
+            format!("/v1/wallet/recipient/{m}"),
+            format!("/v1/wallet/recipient/{w_bad}"),
+        ] {
+            let reply = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(&bad_path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(reply.status(), StatusCode::BAD_REQUEST, "{bad_path}");
+        }
+    }
+    #[tokio::test]
+    async fn api_root_has_safe_html_and_json_discovery_without_exposing_operator_routes() {
+        use tower::ServiceExt;
+        let app = router(AppState::without_db());
+        let json_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::ACCEPT, "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(json_response.status(), StatusCode::OK);
+        assert_eq!(
+            json_response.headers()["x-robots-tag"],
+            "noindex, nofollow, noarchive"
+        );
+        assert_eq!(json_response.headers()[header::CACHE_CONTROL], "no-store");
+        let bytes = to_bytes(json_response.into_body(), 8192).await.unwrap();
+        let directory: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(directory["network"], "testnet");
+        assert_eq!(directory["payment_execution_enabled"], false);
+        assert_eq!(directory["fee_collection_enabled"], false);
+        assert_eq!(directory["routes"]["process_health"], "/health");
+        let serialized = directory.to_string();
         assert!(!serialized.contains("/internal/metrics"));
         assert!(!serialized.contains("/v1/business/reviews"));
         assert!(!serialized.contains("DATABASE_URL"));
-        let browser=app.clone().oneshot(Request::builder().uri("/")
-            .header(header::ACCEPT,"text/html,application/xhtml+xml")
-            .body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(browser.status(),StatusCode::OK);
-        assert!(browser.headers()[header::CONTENT_TYPE].to_str().unwrap().starts_with("text/html"));
-        assert_eq!(browser.headers()[header::CACHE_CONTROL],"no-store");
-        assert!(browser.headers().contains_key(header::CONTENT_SECURITY_POLICY));
-        let html_bytes=to_bytes(browser.into_body(),24*1024).await.unwrap();
-        let html=std::str::from_utf8(&html_bytes).unwrap();
+        let browser = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::ACCEPT, "text/html,application/xhtml+xml")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(browser.status(), StatusCode::OK);
+        assert!(browser.headers()[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("text/html"));
+        assert_eq!(browser.headers()[header::CACHE_CONTROL], "no-store");
+        assert!(browser
+            .headers()
+            .contains_key(header::CONTENT_SECURITY_POLICY));
+        let html_bytes = to_bytes(browser.into_body(), 24 * 1024).await.unwrap();
+        let html = std::str::from_utf8(&html_bytes).unwrap();
         assert!(html.contains("StealthBridge"));
         assert!(html.contains("/v1/corridors/page"));
         assert!(!html.contains("/internal/metrics"));
-        let v1=app.clone().oneshot(Request::builder().uri("/v1")
-            .body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(v1.status(),StatusCode::OK);
-        let v1_data:Value=serde_json::from_slice(&to_bytes(v1.into_body(),8192).await.unwrap()).unwrap();
-        assert_eq!(v1_data,directory);
-        let forbidden=app.clone().oneshot(Request::builder().method("POST").uri("/")
-            .body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(forbidden.status(),StatusCode::METHOD_NOT_ALLOWED);
-        let liveness=app.oneshot(Request::builder().uri("/health")
-            .body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(liveness.status(),StatusCode::OK);
-        assert_eq!(liveness.headers()["x-robots-tag"],"noindex, nofollow, noarchive");
+        let v1 = app
+            .clone()
+            .oneshot(Request::builder().uri("/v1").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(v1.status(), StatusCode::OK);
+        let v1_data: Value =
+            serde_json::from_slice(&to_bytes(v1.into_body(), 8192).await.unwrap()).unwrap();
+        assert_eq!(v1_data, directory);
+        let forbidden = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(forbidden.status(), StatusCode::METHOD_NOT_ALLOWED);
+        let liveness = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(liveness.status(), StatusCode::OK);
+        assert_eq!(
+            liveness.headers()["x-robots-tag"],
+            "noindex, nofollow, noarchive"
+        );
     }
     #[test]
-    fn schema_diagnostics_distinguish_pending_unavailable_and_current(){
-        let missing=observer_schema_projection(true,Some(7),false);
-        assert_eq!(missing.schema_status,"migrations-pending");
-        assert_eq!(missing.registered_migrations,Some(7));
-        assert_eq!(missing.required_migrations,12);
+    fn schema_diagnostics_distinguish_pending_unavailable_and_current() {
+        let missing = observer_schema_projection(true, Some(7), false);
+        assert_eq!(missing.schema_status, "migrations-pending");
+        assert_eq!(missing.registered_migrations, Some(7));
+        assert_eq!(missing.required_migrations, 12);
         assert!(!missing.payment_execution_enabled);
         assert!(!missing.fee_collection_enabled);
-        assert_eq!(observer_schema_projection(false,None,false).schema_status,"not-configured");
-        assert_eq!(observer_schema_projection(true,None,false).schema_status,"unavailable");
-        assert_eq!(observer_schema_projection(true,Some(12),false).schema_status,"schema-incomplete");
-        assert_eq!(observer_schema_projection(true,Some(12),true).schema_status,"current");
+        assert_eq!(
+            observer_schema_projection(false, None, false).schema_status,
+            "not-configured"
+        );
+        assert_eq!(
+            observer_schema_projection(true, None, false).schema_status,
+            "unavailable"
+        );
+        assert_eq!(
+            observer_schema_projection(true, Some(12), false).schema_status,
+            "schema-incomplete"
+        );
+        assert_eq!(
+            observer_schema_projection(true, Some(12), true).schema_status,
+            "current"
+        );
     }
     #[tokio::test]
     async fn signed_tenant_review_reads_hide_identity_and_respect_revocation() {
         use tower::ServiceExt;
-        let db_url=std::env::var("DATABASE_URL").expect("CI postgres");
-        let pool=PgPool::connect(&db_url).await.expect("CI pool");
-        sqlx::migrate!("./migrations").run(&pool).await.expect("schema");
-        let org=Uuid::new_v4();
-        let wallet="GAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB7JZX";
+        let db_url = std::env::var("DATABASE_URL").expect("CI postgres");
+        let pool = PgPool::connect(&db_url).await.expect("CI pool");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("schema");
+        let org = Uuid::new_v4();
+        let wallet = "GAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB7JZX";
         sqlx::query("INSERT INTO organizations (id,display_name,status) VALUES ($1,'CI_ONLY_REVIEW','active')")
             .bind(org).execute(&pool).await.expect("tenant");
         sqlx::query("INSERT INTO organization_members (organization_id,subject,role) VALUES ($1,$2,'owner')")
             .bind(org).bind(wallet).execute(&pool).await.expect("member");
-        let now=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
-        let domain="staging.stealthbridge.example";
-        let identity=org_auth::VerifiedIdentity{
-            organization:org,account:wallet.into(),domain:domain.into(),
-            authenticated_at_unix:now,
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let domain = "staging.stealthbridge.example";
+        let identity = org_auth::VerifiedIdentity {
+            organization: org,
+            account: wallet.into(),
+            domain: domain.into(),
+            authenticated_at_unix: now,
         };
-        let draft=business_reviews::create_request(
-            &pool,&identity,"ci_auth_review_status_001",[5;32],2,now,3600
-        ).await.expect("internal draft");
-        let secret=b"CI-only-unguessable-review-read-session-secret-key-11111";
-        let bearer=org_auth::issue_read_session(&identity,secret).unwrap();
-        let mut state=AppState::without_db();
-        state.db=Some(pool.clone());
-        state.session_domain=Some(domain.into());
-        state.session_secret=Some(Arc::new(secret.to_vec()));
-        let app=router(state);
-        let path=format!("/v1/business/reviews/{}/{}",org,draft.id);
-        let denied=app.clone().oneshot(Request::builder().uri(&path)
-            .body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(denied.status(),StatusCode::UNAUTHORIZED);
-        let response=app.clone().oneshot(Request::builder().uri(&path)
-            .header(header::AUTHORIZATION,format!("Bearer {bearer}"))
-            .body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(response.status(),StatusCode::OK);
-        assert_eq!(response.headers()[header::CACHE_CONTROL],"no-store");
-        let bytes=to_bytes(response.into_body(),8192).await.unwrap();
-        let data:Value=serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(data["review_count"],0);
-        assert_eq!(data["remaining_reviewers"],2);
-        assert_eq!(data["financial_execution_authorized"],false);
-        assert_eq!(data["signatures_verified"],false);
+        let draft = business_reviews::create_request(
+            &pool,
+            &identity,
+            "ci_auth_review_status_001",
+            [5; 32],
+            2,
+            now,
+            3600,
+        )
+        .await
+        .expect("internal draft");
+        let secret = b"CI-only-unguessable-review-read-session-secret-key-11111";
+        let bearer = org_auth::issue_read_session(&identity, secret).unwrap();
+        let mut state = AppState::without_db();
+        state.db = Some(pool.clone());
+        state.session_domain = Some(domain.into());
+        state.session_secret = Some(Arc::new(secret.to_vec()));
+        let app = router(state);
+        let path = format!("/v1/business/reviews/{}/{}", org, draft.id);
+        let denied = app
+            .clone()
+            .oneshot(Request::builder().uri(&path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&path)
+                    .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let bytes = to_bytes(response.into_body(), 8192).await.unwrap();
+        let data: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(data["review_count"], 0);
+        assert_eq!(data["remaining_reviewers"], 2);
+        assert_eq!(data["financial_execution_authorized"], false);
+        assert_eq!(data["signatures_verified"], false);
         assert!(data.get("reviewer").is_none());
         assert!(data.get("initiator").is_none());
-        let foreign=app.clone().oneshot(Request::builder().uri(
-            format!("/v1/business/reviews/{}/{}",Uuid::new_v4(),draft.id))
-            .header(header::AUTHORIZATION,format!("Bearer {bearer}"))
-            .body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(foreign.status(),StatusCode::UNAUTHORIZED);
+        let foreign = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v1/business/reviews/{}/{}",
+                        Uuid::new_v4(),
+                        draft.id
+                    ))
+                    .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(foreign.status(), StatusCode::UNAUTHORIZED);
         sqlx::query("UPDATE organization_members SET revoked_at=now() WHERE organization_id=$1 AND subject=$2")
             .bind(org).bind(wallet).execute(&pool).await.expect("revoke");
-        let revoked=app.oneshot(Request::builder().uri(&path)
-            .header(header::AUTHORIZATION,format!("Bearer {bearer}"))
-            .body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(revoked.status(),StatusCode::UNAUTHORIZED);
+        let revoked = app
+            .oneshot(
+                Request::builder()
+                    .uri(&path)
+                    .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
         sqlx::query("DELETE FROM business_review_requests WHERE organization_id=$1")
-            .bind(org).execute(&pool).await.expect("cleanup draft");
+            .bind(org)
+            .execute(&pool)
+            .await
+            .expect("cleanup draft");
         sqlx::query("DELETE FROM organization_members WHERE organization_id=$1")
-            .bind(org).execute(&pool).await.expect("cleanup member");
+            .bind(org)
+            .execute(&pool)
+            .await
+            .expect("cleanup member");
         sqlx::query("DELETE FROM organizations WHERE id=$1")
-            .bind(org).execute(&pool).await.expect("cleanup tenant");
+            .bind(org)
+            .execute(&pool)
+            .await
+            .expect("cleanup tenant");
     }
 
     #[tokio::test]
     async fn review_status_unconfigured_fails_closed_without_exposing_org_data() {
         use tower::ServiceExt;
-        let app=router(AppState::without_db());
-        let uri=format!("/v1/business/reviews/{}/{}",Uuid::new_v4(),Uuid::new_v4());
-        let no_auth=app.clone().oneshot(Request::builder().uri(&uri)
-            .body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(no_auth.status(),StatusCode::SERVICE_UNAVAILABLE);
-        let no_write=app.oneshot(Request::builder().method("POST").uri(&uri)
-            .body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(no_write.status(),StatusCode::METHOD_NOT_ALLOWED);
+        let app = router(AppState::without_db());
+        let uri = format!("/v1/business/reviews/{}/{}", Uuid::new_v4(), Uuid::new_v4());
+        let no_auth = app
+            .clone()
+            .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(no_auth.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let no_write = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(no_write.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
     #[tokio::test]
     async fn platform_module_inventory_is_safe_get_only_metadata() {
         use tower::ServiceExt;
-        let app=router(AppState::without_db());
-        let result=app.clone().oneshot(Request::builder().uri("/v1/platform/modules")
-            .body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(result.status(),StatusCode::OK);
-        let body=to_bytes(result.into_body(),32_768).await.unwrap();
-        let value:Value=serde_json::from_slice(&body).unwrap();
-        assert_eq!(value["product"],"StealthBridge");
-        assert_eq!(value["network"],"testnet");
-        assert_eq!(value["payment_execution_enabled"],false);
-        assert_eq!(value["privacy_verified"],false);
-        assert_eq!(value["mainnet_enabled"],false);
-        assert_eq!(value["modules"].as_array().unwrap().len(),11);
-        let post=app.oneshot(Request::builder().method("POST").uri("/v1/platform/modules")
-            .body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(post.status(),StatusCode::METHOD_NOT_ALLOWED);
+        let app = router(AppState::without_db());
+        let result = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/platform/modules")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.status(), StatusCode::OK);
+        let body = to_bytes(result.into_body(), 32_768).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["product"], "StealthBridge");
+        assert_eq!(value["network"], "testnet");
+        assert_eq!(value["payment_execution_enabled"], false);
+        assert_eq!(value["privacy_verified"], false);
+        assert_eq!(value["mainnet_enabled"], false);
+        assert_eq!(value["modules"].as_array().unwrap().len(), 11);
+        let post = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/platform/modules")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(post.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
     #[tokio::test]
-    async fn missing_database_never_fabricates_an_observer_ledger(){
+    async fn missing_database_never_fabricates_an_observer_ledger() {
         use tower::ServiceExt;
-        let app=router(AppState::without_db());
-        let result=app.oneshot(Request::builder().uri("/v1/observer")
-            .body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(result.status(),StatusCode::SERVICE_UNAVAILABLE);
+        let app = router(AppState::without_db());
+        let result = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/observer")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
     #[tokio::test]
     async fn sensitive_observer_metrics_are_hidden_without_operator_bearer() {
         use tower::ServiceExt;
-        let unconfigured=router(AppState::without_db());
-        let req=||Request::builder().uri("/internal/metrics")
-            .body(Body::empty()).unwrap();
-        let absent=unconfigured.oneshot(req()).await.unwrap();
-        assert_eq!(absent.status(),StatusCode::NOT_FOUND);
+        let unconfigured = router(AppState::without_db());
+        let req = || {
+            Request::builder()
+                .uri("/internal/metrics")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let absent = unconfigured.oneshot(req()).await.unwrap();
+        assert_eq!(absent.status(), StatusCode::NOT_FOUND);
 
-        let mut state=AppState::without_db();
-        state.metrics_token=Some("unit-test-operator-bearer-1234567890".to_owned());
-        let app=router(state);
-        let unauthorized=app.clone().oneshot(req()).await.unwrap();
-        assert_eq!(unauthorized.status(),StatusCode::UNAUTHORIZED);
-        let invalid=app.clone().oneshot(Request::builder().uri("/internal/metrics")
-            .header(header::AUTHORIZATION,"Bearer invalid")
-            .body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(invalid.status(),StatusCode::UNAUTHORIZED);
-        let accepted=app.oneshot(Request::builder().uri("/internal/metrics")
-            .header(header::AUTHORIZATION,"Bearer unit-test-operator-bearer-1234567890")
-            .body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(accepted.status(),StatusCode::OK);
-        let bytes=to_bytes(accepted.into_body(),16_384).await.unwrap();
-        let metrics=core::str::from_utf8(&bytes).unwrap();
+        let mut state = AppState::without_db();
+        state.metrics_token = Some("unit-test-operator-bearer-1234567890".to_owned());
+        let app = router(state);
+        let unauthorized = app.clone().oneshot(req()).await.unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        let invalid = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/internal/metrics")
+                    .header(header::AUTHORIZATION, "Bearer invalid")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
+        let accepted = app
+            .oneshot(
+                Request::builder()
+                    .uri("/internal/metrics")
+                    .header(
+                        header::AUTHORIZATION,
+                        "Bearer unit-test-operator-bearer-1234567890",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::OK);
+        let bytes = to_bytes(accepted.into_body(), 16_384).await.unwrap();
+        let metrics = core::str::from_utf8(&bytes).unwrap();
         assert!(metrics.contains("stealthbridge_database_configured 0"));
         // No DB is configured: never fabricate observer metrics or emit IDs.
         assert!(!metrics.contains("stealthbridge_observer_public_events_stored"));
@@ -1982,57 +2875,73 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn observer_activity_rejects_bad_filters_before_accessing_database(){
+    async fn observer_activity_rejects_bad_filters_before_accessing_database() {
         use tower::ServiceExt;
-        let app=router(AppState::without_db());
+        let app = router(AppState::without_db());
         for uri in [
-           "/v1/observer/activity?limit=0",
-           "/v1/observer/activity?limit=26",
-           "/v1/observer/activity?contract_id=not-a-contract",
-           "/v1/observer/activity?before=untrusted",
-           "/v1/observer/activity?unexpected=anything",
-           "/v1/observer/activity?limit=2&limit=3",
-        ]{
-            let response=app.clone().oneshot(Request::builder().uri(uri)
-                .body(Body::empty()).unwrap()).await.unwrap();
-            assert_eq!(response.status(),StatusCode::BAD_REQUEST,"{uri}");
+            "/v1/observer/activity?limit=0",
+            "/v1/observer/activity?limit=26",
+            "/v1/observer/activity?contract_id=not-a-contract",
+            "/v1/observer/activity?before=untrusted",
+            "/v1/observer/activity?unexpected=anything",
+            "/v1/observer/activity?limit=2&limit=3",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
         }
-        let response=app.oneshot(Request::builder().uri("/v1/observer/activity")
-            .body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(response.status(),StatusCode::SERVICE_UNAVAILABLE);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/observer/activity")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]
     fn public_rpc_budget_is_bounded_per_peer_and_resets_only_after_window() {
-        let peer:IpAddr="127.0.0.1".parse().unwrap();
-        let other:IpAddr="127.0.0.2".parse().unwrap();
-        let mut limit=PublicReadLimiter::new(2);
-        let start=Instant::now();
-        assert!(limit.admit(Some(peer),start));
-        assert!(limit.admit(Some(peer),start));
-        assert!(!limit.admit(Some(peer),start));
-        assert!(limit.admit(Some(other),start));
-        assert!(limit.admit(None,start));
-        assert!(limit.admit(None,start));
-        assert!(!limit.admit(None,start));
-        assert!(limit.admit(Some(peer),start+Duration::from_secs(61)));
+        let peer: IpAddr = "127.0.0.1".parse().unwrap();
+        let other: IpAddr = "127.0.0.2".parse().unwrap();
+        let mut limit = PublicReadLimiter::new(2);
+        let start = Instant::now();
+        assert!(limit.admit(Some(peer), start));
+        assert!(limit.admit(Some(peer), start));
+        assert!(!limit.admit(Some(peer), start));
+        assert!(limit.admit(Some(other), start));
+        assert!(limit.admit(None, start));
+        assert!(limit.admit(None, start));
+        assert!(!limit.admit(None, start));
+        assert!(limit.admit(Some(peer), start + Duration::from_secs(61)));
     }
 
     #[tokio::test]
     async fn public_rpc_429_stays_structured_and_does_not_serve_mock_data() {
         use tower::ServiceExt;
-        let mut state=AppState::without_db();
-        state.rpc_rate_limit=Arc::new(Mutex::new(PublicReadLimiter::new(1)));
-        let app=router(state);
-        let request=||Request::builder()
-            .uri("/v1/transactions/not-a-valid-hash")
-            .body(Body::empty()).unwrap();
-        let first=app.clone().oneshot(request()).await.unwrap();
-        assert_eq!(first.status(),StatusCode::BAD_REQUEST);
-        let second=app.oneshot(request()).await.unwrap();
-        assert_eq!(second.status(),StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(second.headers().get("x-error-code").unwrap(),"RATE_LIMITED");
-        assert_eq!(second.headers().get(header::RETRY_AFTER).unwrap(),"60");
+        let mut state = AppState::without_db();
+        state.rpc_rate_limit = Arc::new(Mutex::new(PublicReadLimiter::new(1)));
+        let app = router(state);
+        let request = || {
+            Request::builder()
+                .uri("/v1/transactions/not-a-valid-hash")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let first = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(first.status(), StatusCode::BAD_REQUEST);
+        let second = app.oneshot(request()).await.unwrap();
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            second.headers().get("x-error-code").unwrap(),
+            "RATE_LIMITED"
+        );
+        assert_eq!(second.headers().get(header::RETRY_AFTER).unwrap(), "60");
     }
 
     #[test]
@@ -2047,8 +2956,10 @@ mod tests {
         assert_eq!(valid.ledger_sequence, 12345);
         assert_eq!(valid.ledger_hash, "a".repeat(64));
         assert!(verified_network_status(
-            &json!({"passphrase": "Public Global Stellar Network ; September 2015"}), &ledger
-        ).is_err());
+            &json!({"passphrase": "Public Global Stellar Network ; September 2015"}),
+            &ledger
+        )
+        .is_err());
         for bad in [
             json!({"protocolVersion": 0, "sequence": 12345, "closeTime": "1790000000", "id": "a".repeat(64)}),
             json!({"protocolVersion": 27, "sequence": 0, "closeTime": "1790000000", "id": "a".repeat(64)}),
@@ -2060,7 +2971,8 @@ mod tests {
         }
         assert!(AppState::checked_rpc_envelope(
             &json!({"jsonrpc":"2.0","id":"wrong-id","result":ledger})
-        ).is_err());
+        )
+        .is_err());
     }
 
     #[tokio::test]
@@ -2068,22 +2980,34 @@ mod tests {
         let target_hits = Arc::new(AtomicU64::new(0));
         let visited = target_hits.clone();
         let test_app = Router::new()
-            .route("/rpc", post(|| async {
-                (StatusCode::TEMPORARY_REDIRECT, [(header::LOCATION, "/target")])
-            }))
-            .route("/target", post(move || {
-                let visited = visited.clone();
-                async move {
-                    visited.fetch_add(1, Ordering::SeqCst);
-                    Json(json!({"jsonrpc":"2.0","id":"stealthbridge-observer",
+            .route(
+                "/rpc",
+                post(|| async {
+                    (
+                        StatusCode::TEMPORARY_REDIRECT,
+                        [(header::LOCATION, "/target")],
+                    )
+                }),
+            )
+            .route(
+                "/target",
+                post(move || {
+                    let visited = visited.clone();
+                    async move {
+                        visited.fetch_add(1, Ordering::SeqCst);
+                        Json(json!({"jsonrpc":"2.0","id":"stealthbridge-observer",
                         "result":{"passphrase":TESTNET_PASSPHRASE}}))
-                }
-            }));
+                    }
+                }),
+            );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await.expect("local redirect fixture");
+            .await
+            .expect("local redirect fixture");
         let addr = listener.local_addr().expect("address");
         let handle = tokio::spawn(async move {
-            axum::serve(listener, test_app).await.expect("test RPC server");
+            axum::serve(listener, test_app)
+                .await
+                .expect("test RPC server");
         });
         let mut state = AppState::without_db();
         state.rpc_url = format!("http://{addr}/rpc");
@@ -2102,9 +3026,7 @@ mod tests {
             privacy_rail: "confidential-token".into(),
         };
         assert!(row.safe_public_record());
-        row.asset_issuer = Some(
-            "GAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB7JZX".into()
-        );
+        row.asset_issuer = Some("GAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB7JZX".into());
         assert!(row.safe_public_record());
         row.asset_issuer = Some(format!("G{}", "A".repeat(55)));
         assert!(!row.safe_public_record());
@@ -2148,8 +3070,14 @@ mod tests {
     fn remote_postgres_requires_tls_and_local_ci_remains_supported() {
         assert!(validate_database_transport("postgres://ci:ci@localhost:5432/ci").is_ok());
         assert!(validate_database_transport("postgresql://ci:ci@127.0.0.1/ci").is_ok());
-        assert!(validate_database_transport("postgresql://user:pass@db.example/neondb?channel_binding=require&sslmode=require").is_ok());
-        assert!(validate_database_transport("postgresql://user:pass@db.example/neondb?sslmode=verify-full").is_ok());
+        assert!(validate_database_transport(
+            "postgresql://user:pass@db.example/neondb?channel_binding=require&sslmode=require"
+        )
+        .is_ok());
+        assert!(validate_database_transport(
+            "postgresql://user:pass@db.example/neondb?sslmode=verify-full"
+        )
+        .is_ok());
         for rejected in [
             "postgresql://user:pass@db.example/neondb",
             "postgresql://user:pass@db.example/neondb?sslmode=disable",
@@ -2163,8 +3091,13 @@ mod tests {
     #[tokio::test]
     async fn postgres_readiness_checks_migration_markers_and_core_relations() {
         let url = env::var("DATABASE_URL").expect("isolated CI PostgreSQL DATABASE_URL");
-        let pool = PgPool::connect(&url).await.expect("connect isolated CI database");
-        sqlx::migrate!("./migrations").run(&pool).await.expect("apply test schema");
+        let pool = PgPool::connect(&url)
+            .await
+            .expect("connect isolated CI database");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("apply test schema");
         assert!(database_schema_ready(&pool).await);
         let completed: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM _sqlx_migrations WHERE success=TRUE AND version = ANY($1::bigint[])",
@@ -2175,39 +3108,54 @@ mod tests {
         pool.close().await;
     }
     #[test]
-    fn readiness_distinguishes_missing_and_unavailable_database_states(){
-        let missing=readiness_projection(true,false,false);
-        assert_eq!(missing.status,"degraded");
-        assert_eq!(missing.database,"not-configured");
-        assert_eq!(missing.payments,"disabled");
-        let unavailable=readiness_projection(true,true,false);
-        assert_eq!(unavailable.database,"unavailable");
-        assert_eq!(unavailable.status,"degraded");
-        let rpc_down=readiness_projection(false,true,true);
-        assert_eq!(rpc_down.stellar_rpc,"unavailable");
-        assert_eq!(rpc_down.status,"degraded");
-        assert_eq!(readiness_projection(true,true,true).status,"ready");
+    fn readiness_distinguishes_missing_and_unavailable_database_states() {
+        let missing = readiness_projection(true, false, false);
+        assert_eq!(missing.status, "degraded");
+        assert_eq!(missing.database, "not-configured");
+        assert_eq!(missing.payments, "disabled");
+        let unavailable = readiness_projection(true, true, false);
+        assert_eq!(unavailable.database, "unavailable");
+        assert_eq!(unavailable.status, "degraded");
+        let rpc_down = readiness_projection(false, true, true);
+        assert_eq!(rpc_down.stellar_rpc, "unavailable");
+        assert_eq!(rpc_down.status, "degraded");
+        assert_eq!(readiness_projection(true, true, true).status, "ready");
     }
     #[test]
-    fn public_error_codes_and_metrics_auth_are_stable(){
-        assert_eq!(safe_error(StatusCode::TOO_MANY_REQUESTS).0,"RATE_LIMITED");
-        assert_eq!(safe_error(StatusCode::BAD_GATEWAY).0,"UPSTREAM_UNAVAILABLE");
-        assert_eq!(safe_error(StatusCode::SERVICE_UNAVAILABLE).0,"DEPENDENCY_UNAVAILABLE");
-        assert!(token_matches("internal-secret","internal-secret"));
-        assert!(!token_matches("internal-secret","internal-secret-extra"));
-        assert!(!token_matches("internal-secret","public"));
+    fn public_error_codes_and_metrics_auth_are_stable() {
+        assert_eq!(safe_error(StatusCode::TOO_MANY_REQUESTS).0, "RATE_LIMITED");
+        assert_eq!(
+            safe_error(StatusCode::BAD_GATEWAY).0,
+            "UPSTREAM_UNAVAILABLE"
+        );
+        assert_eq!(
+            safe_error(StatusCode::SERVICE_UNAVAILABLE).0,
+            "DEPENDENCY_UNAVAILABLE"
+        );
+        assert!(token_matches("internal-secret", "internal-secret"));
+        assert!(!token_matches("internal-secret", "internal-secret-extra"));
+        assert!(!token_matches("internal-secret", "public"));
     }
     #[tokio::test]
     async fn contract_discovery_reflects_actual_undeployed_canonical_manifest() {
-        let response=contract_discovery().await.expect("synchronized Testnet manifest");
-        assert_eq!(response.0.network,"testnet");
+        let response = contract_discovery()
+            .await
+            .expect("synchronized Testnet manifest");
+        assert_eq!(response.0.network, "testnet");
         assert!(!response.0.on_chain_verified);
         assert!(!response.0.payment_execution_enabled);
-        assert_eq!(response.0.manifest["status"],"not-deployed");
-        assert_eq!(response.0.public_interface["status"],"source-interface-only");
-        assert!(response.0.public_interface["contracts"]["corridor-registry"]["reads"]["is_enabled"].is_object());
-        assert!(response.0.manifest["contractAddresses"].as_object()
-            .is_some_and(|entries|entries.is_empty()));
+        assert_eq!(response.0.manifest["status"], "not-deployed");
+        assert_eq!(
+            response.0.public_interface["status"],
+            "source-interface-only"
+        );
+        assert!(
+            response.0.public_interface["contracts"]["corridor-registry"]["reads"]["is_enabled"]
+                .is_object()
+        );
+        assert!(response.0.manifest["contractAddresses"]
+            .as_object()
+            .is_some_and(|entries| entries.is_empty()));
     }
     #[test]
     fn router_constructs_without_database_or_credentials() {
@@ -2219,14 +3167,20 @@ mod tests {
     }
     #[test]
     fn upstream_must_have_matching_rpc_envelope_and_no_error() {
-        let valid = json!({"jsonrpc":"2.0","id":"stealthbridge-observer","result":{"status":"NOT_FOUND"}});
-        assert_eq!(AppState::checked_rpc_envelope(&valid).unwrap()["status"],"NOT_FOUND");
+        let valid =
+            json!({"jsonrpc":"2.0","id":"stealthbridge-observer","result":{"status":"NOT_FOUND"}});
+        assert_eq!(
+            AppState::checked_rpc_envelope(&valid).unwrap()["status"],
+            "NOT_FOUND"
+        );
         for broken in [
             json!({"id":"stealthbridge-observer","result":{}}),
             json!({"jsonrpc":"2.0","id":"another-client","result":{}}),
             json!({"jsonrpc":"2.0","id":"stealthbridge-observer","result":null}),
             json!({"jsonrpc":"2.0","id":"stealthbridge-observer","error":{"code":-32000}}),
-        ] { assert!(AppState::checked_rpc_envelope(&broken).is_err()); }
+        ] {
+            assert!(AppState::checked_rpc_envelope(&broken).is_err());
+        }
     }
     #[test]
     fn stale_and_future_dated_heads_make_readiness_degraded() {
@@ -2239,8 +3193,8 @@ mod tests {
     }
     #[test]
     fn backpressure_and_response_budget_are_finite() {
-        assert_eq!(MAX_IN_FLIGHT_RPC,16);
-        assert_eq!(MAX_RPC_BODY_BYTES,2*1024*1024);
+        assert_eq!(MAX_IN_FLIGHT_RPC, 16);
+        assert_eq!(MAX_RPC_BODY_BYTES, 2 * 1024 * 1024);
     }
 
     #[tokio::test]
@@ -2422,7 +3376,8 @@ mod tests {
 
         let rpc_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let rpc_addr = rpc_listener.local_addr().unwrap();
-        let rpc_task = tokio::spawn(async move { axum::serve(rpc_listener, rpc_app).await.unwrap() });
+        let rpc_task =
+            tokio::spawn(async move { axum::serve(rpc_listener, rpc_app).await.unwrap() });
 
         let mut state = AppState::without_db();
         state.rpc_url = format!("http://{rpc_addr}");
