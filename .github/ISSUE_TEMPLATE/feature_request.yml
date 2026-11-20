@@ -1,0 +1,23 @@
+name: Backend Feature / Architecture Proposal
+description: Propose API endpoints, SQLx migrations, provider adapters, webhook pipelines, or observability checks.
+title: "[Backend Proposal] "
+labels: ["enhancement", "backend"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement & cross-repo impact (SDK / Frontend / Contracts)
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Transactional, authorization, and integration-test criteria
+    validations:
+      required: true
+  - type: textarea
+    id: security
+    attributes:
+      label: Security, rate-limit, and fail-closed safety constraints
+    validations:
+      required: true

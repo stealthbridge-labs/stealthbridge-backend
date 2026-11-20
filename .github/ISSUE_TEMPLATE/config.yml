@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security Vulnerability Disclosure
+    url: https://github.com/stealthbridge-labs/stealthbridge-backend/blob/main/SECURITY.md
+    about: Report auth bypass, SQLx/DB, replay, HMAC, or settlement bugs privately.
+  - name: Support & Cross-Repo Documentation
+    url: https://github.com/stealthbridge-labs/stealthbridge-backend/blob/main/SUPPORT.md
+    about: Backend setup, Neon migrations, and Stellar Testnet RPC help.

@@ -1,0 +1,28 @@
+name: Bug report (Backend / API / SQLx / RPC)
+description: Report a reproducible Rust/Axum, PostgreSQL/SQLx, or Stellar RPC issue.
+title: "[Backend Bug] "
+labels: ["bug", "backend"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Never paste database URLs, HMAC bridge secrets (`STEALTHBRIDGE_ACCOUNT_BRIDGE_SECRET`), private keys, or PII. For security issues, follow `SECURITY.md`.
+  - type: input
+    id: module
+    attributes:
+      label: Affected endpoint or Rust module
+      placeholder: "e.g., src/settlement_lifecycle.rs, /v1/account/beneficiaries, migrations/"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps & redacted output
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual behavior
+    validations:
+      required: true
