@@ -110,6 +110,7 @@ Reliable ledger observer operations and retention, exact provider evidence and r
 
 - **Protocol 30 & CAP-84 StrKeys:** Recipient presence and address decoders validate `G...`, `M...`, `C...`, and CAP-84 `W...` muxed addresses without permissive regex fallbacks.
 - **Privacy Rail Registry (`src/privacy_rails.rs`):** Read-only metadata & capability gating for `private-payments` and `confidential-token`, keeping `privacy_verified = false` until independent proof verification and issuer approvals exist.
+- **Account Beneficiaries (`src/account_beneficiaries.rs`, migration `202611200001`):** Authenticated HMAC-signed PostgreSQL beneficiary book (`GET`/`PUT`/`DELETE /v1/account/beneficiaries`) validating Protocol 30 `G...`/`M...`/`C...`/`W...` addresses with single-use nonce replay protection (`identity_verified = false`, `payment_execution_enabled = false`).
 - **Controlled Testnet Settlement Lifecycle (`src/settlement_lifecycle.rs`, migration `202611190001`):** Explicit PostgreSQL/SQLx state machine (`quote_unavailable`, `policy_verified`, `customer_authorized`, `privacy_proof_verified`, `tx_submitted`, `chain_finalized`, `reconciled`) separating Testnet finality from off-chain fiat payouts (`fiat_payouts_enabled = false`, `live_fx_enabled = false`, `mainnet_enabled = false`).
 - **Release Readiness:** See the consolidated cross-repo assessment in [`stealthbridge-contracts/docs/MILESTONE-6-RELEASE-READINESS-REPORT.md`](https://github.com/stealthbridge-labs/stealthbridge-contracts/blob/main/docs/MILESTONE-6-RELEASE-READINESS-REPORT.md).
 

@@ -31,3 +31,4 @@ pub mod privacy_rails;
 pub mod customer_ciphertext_vault;
 
 pub mod payment_instructions;
+pub mod account_beneficiaries;

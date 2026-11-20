@@ -2119,6 +2119,13 @@ pub fn router(state: AppState) -> Router {
                 .layer(axum::extract::DefaultBodyLimit::max(8192)),
         )
         .route(
+            "/v1/account/beneficiaries",
+            get(crate::account_beneficiaries::list)
+                .put(crate::account_beneficiaries::upsert)
+                .delete(crate::account_beneficiaries::remove)
+                .layer(axum::extract::DefaultBodyLimit::max(2048)),
+        )
+        .route(
             "/v1/account/directory",
             get(crate::account_directory::account_directory),
         )
