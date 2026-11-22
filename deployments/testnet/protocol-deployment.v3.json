@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 3,
+  "recordType": "soroban-testnet-protocol-deployment-manifest",
+  "network": "testnet",
+  "networkPassphrase": "Test SDF Network ; September 2015",
+  "deployedAt": "2026-11-20T19:51:45Z",
+  "governanceContracts": {
+    "administrator": "GC3YRVLB7IN7SNUYVWFUC6OD3QWJXCUZ4HOBNIPVGY7BZDVOYMDNX5TN",
+    "corridor-registry": {
+      "contractId": "CDS6HBE6YJSZTRG3VR2HLCNHWJZMKB43BLFFEHEH3Z76WXAF46LW7JOB",
+      "wasmSha256": "588d17f99850272f2f18e6ee407d94329b4f8ae415c2f6b71993cf59f4139099",
+      "deploymentTx": "0ac4094247fd50872d079c9637b0975f825f99574e6722c9c69739d8c5c143e5",
+      "deploymentLedger": 5244269
+    },
+    "policy-registry": {
+      "contractId": "CBXWEA5PMDTBN5AN7FJYGGAPIWLRKXYHWLVWG5WOXH3HSRDB4RYTJBN5",
+      "wasmSha256": "856186ba3dca1feff010c670bd1ae9818bf69e284304273f943745603b9a7912",
+      "deploymentTx": "34c2e84cad5be5181b7e1964d4e48e2c26ca021583373922f821c0038abce118",
+      "deploymentLedger": 5244283
+    },
+    "governance-gate": {
+      "contractId": "CD2KIMDRYJMKGO5SMIBOQP6ADPW5I4THNZFGXWYLIPGSXAI5NRXVAPKV",
+      "wasmSha256": "66b40fe5ee4f704a91acf39922ed130cc1eb4fc0cdc3c5ee5a30614921f4aa81",
+      "deploymentTx": "9468801411a6bbb7fb2966c0225057bb4f3c8a7113aa687c0a0be744a7c5b341",
+      "deploymentLedger": 5244293
+    }
+  },
+  "protocolDeployer": "GAEJW2FUZMFVRZNX6G366XNMG5PR3NTIMNHFHMDWXC4X3TYFEPTC5JSO",
+  "protocolContracts": {
+    "privacy-verifier": {
+      "contractId": "CBFFDYLDWCN2D7U3MMVX75TFE5MHZX6OYL66HHWZXEGOCL5YBTZCXAOV",
+      "wasmSha256": "ebfe4b2cb5ad98e1470c4a4c46018777be83348bf0e52d90d091452c8027e3a7",
+      "wasmUploadTx": "9c77fb32c691307edd76a0151e68843fdc9170150a5f29548086e453a0f09f54",
+      "deploymentTx": "3443780dd9a456e8c756caea797db901b15a74dc8ff324e341c1a382f2b89e0b",
+      "deploymentLedger": 5836021,
+      "initializeTx": "77ed0fd338de81c3f46a7e8f94d45d43c97f99178f9fa3d40cc1a48d36c85a52",
+      "initializeLedger": 5836102,
+      "liveProofVerifyTx": "cdddff85a13e79451d645d67e2c0f4bc943d70661b0cb1ec87329ddc93e34534",
+      "liveProofVerifyLedger": 5836133,
+      "observedAdmin": "GAEJW2FUZMFVRZNX6G366XNMG5PR3NTIMNHFHMDWXC4X3TYFEPTC5JSO",
+      "observedPaused": false,
+      "readbackWasmMatches": true,
+      "proofSystem": "BN254-Groth16"
+    },
+    "smart-account": {
+      "contractId": "CAZVXXE3K3PA4UPREK32Q6RXKHZKGBD3CXGTJQDCUMG2SNS4WLGFCY3O",
+      "wasmSha256": "e606fae156402f5aafef5df611a69276a0023c0623e5daaab4a567c30995fede",
+      "wasmUploadTx": "b3c71c0f78cac7070a0b205d81563217beb8376f8deaa684ecef795de3b04ed9",
+      "deploymentTx": "001115b3d3455e023e9b06a02d29e4b59be84b129ca0123d52eb40c6031e3f7a",
+      "deploymentLedger": 5836353,
+      "initializeTx": "a060f404612ab0cc7053e89d56eec08e00cc79f1eec0470a235187378d2f4bf6",
+      "initializeLedger": 5836360,
+      "observedOwnerAccount": "GASUPDAHPGSTVNL54WSE7Z37SSS7KGTZULQDJ6MSQVQY4H3SMR6YQ3QV",
+      "observedGuardianAccount": "GBXXE7JVT6JPUOLBYZM4ECD63DUVGGPJZXYMVVLUZT42GFPHXG3UEARH",
+      "observedThreshold": 1,
+      "observedPaused": false,
+      "readbackWasmMatches": true
+    },
+    "settlement-adapter": {
+      "contractId": "CDTOZXC4AMVTOP4ABY5WSYWI2W4UJDMNIM3NRY7225GMFVAKFD4DIWAC",
+      "wasmSha256": "6e8aa7765074f90a5c63e9f81bed31bc1e6dbe28f82b2a47e6e18fd44c2449b6",
+      "wasmUploadTx": "44e09a475160221ac22c983794a3175cefd46b1dc03e2c375c2d561a543bc37a",
+      "deploymentTx": "0a58e36d43b0fdba1bd6aaadd72f19469fce06bae2724dd51e6dd530a5ec7e7f",
+      "deploymentLedger": 5836035,
+      "observedAdmin": "GAEJW2FUZMFVRZNX6G366XNMG5PR3NTIMNHFHMDWXC4X3TYFEPTC5JSO",
+      "observedGovernanceGate": "CD2KIMDRYJMKGO5SMIBOQP6ADPW5I4THNZFGXWYLIPGSXAI5NRXVAPKV",
+      "observedPaused": false,
+      "readbackWasmMatches": true
+    },
+    "fee-vault": {
+      "contractId": "CBJWFVGD3D2QEFTICRT2GMQRANVR32735OSZ5F77MLBCURDROYGEL362",
+      "wasmSha256": "2797011ea55583b1b7e5f1aa7fe87e05b6e8fdbe30b8007290134a8821e24175",
+      "wasmUploadTx": "966caeb5617761818274616db2cc26c2268542adc5a396743f6f8ab767d93b5e",
+      "deploymentTx": "ca92251744e60be838a5966ab8022d134d87dcf876b95ebc0a30244108012c34",
+      "deploymentLedger": 5836038,
+      "observedAdmin": "GAEJW2FUZMFVRZNX6G366XNMG5PR3NTIMNHFHMDWXC4X3TYFEPTC5JSO",
+      "observedBeneficiary": "GAEJW2FUZMFVRZNX6G366XNMG5PR3NTIMNHFHMDWXC4X3TYFEPTC5JSO",
+      "observedAsset": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+      "observedPaused": true,
+      "observedClaimsPaused": true,
+      "readbackWasmMatches": true
+    }
+  },
+  "scope": {
+    "mainnet_enabled": false,
+    "fiat_payouts_enabled": false,
+    "live_fx_enabled": false,
+    "external_audit_completed": false,
+    "testnet_governance_deployed": true,
+    "testnet_privacy_verifier_deployed": true,
+    "testnet_smart_account_deployed": true,
+    "testnet_settlement_adapter_deployed": true,
+    "testnet_fee_vault_deployed": true,
+    "testnet_groth16_pairing_verified": true
+  },
+  "notes": "Testnet-only protocol deployment verified via Stellar CLI 27.1.0 (`stellar contract fetch` SHA-256 parity and Horizon transaction inclusion) plus live BN254 Groth16 verify_and_spend execution at ledger 5836133. Mainnet, fiat payouts, live FX, and independent security audits remain explicitly false."
+}

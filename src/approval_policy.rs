@@ -51,9 +51,7 @@ pub struct ReviewAssessment {
 }
 
 fn valid_subject(s: &str) -> bool {
-    (8..=128).contains(&s.len())
-        && s.trim() == s
-        && s.bytes().all(|b| b.is_ascii_alphanumeric())
+    (8..=128).contains(&s.len()) && s.trim() == s && s.bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
 /// Validate review constraints without trusting caller-supplied roles, subjects,
@@ -158,25 +156,46 @@ mod tests {
     fn cross_tenant_replay_self_approval_and_duplicate_records_fail() {
         let (policy, mut records) = setup();
         records[0].organization = Uuid::new_v4();
-        assert_eq!(assess_review(&policy, &records, 1_780_000_300), Err(ReviewError::WrongOrganization));
+        assert_eq!(
+            assess_review(&policy, &records, 1_780_000_300),
+            Err(ReviewError::WrongOrganization)
+        );
         records[0].organization = policy.organization;
         records[0].reviewer = policy.initiator.clone();
-        assert_eq!(assess_review(&policy, &records, 1_780_000_300), Err(ReviewError::SameInitiator));
+        assert_eq!(
+            assess_review(&policy, &records, 1_780_000_300),
+            Err(ReviewError::SameInitiator)
+        );
         records[0].reviewer = records[1].reviewer.clone();
-        assert_eq!(assess_review(&policy, &records, 1_780_000_300), Err(ReviewError::DuplicateReviewer));
+        assert_eq!(
+            assess_review(&policy, &records, 1_780_000_300),
+            Err(ReviewError::DuplicateReviewer)
+        );
     }
 
     #[test]
     fn invalid_roles_and_time_constraints_fail() {
         let (mut policy, mut records) = setup();
         records[0].role = Role::Operator;
-        assert_eq!(assess_review(&policy, &records, 1_780_000_300), Err(ReviewError::ForbiddenRole));
+        assert_eq!(
+            assess_review(&policy, &records, 1_780_000_300),
+            Err(ReviewError::ForbiddenRole)
+        );
         records[0].role = Role::Approver;
-        assert_eq!(assess_review(&policy, &records, policy.expires_at_unix), Err(ReviewError::Expired));
+        assert_eq!(
+            assess_review(&policy, &records, policy.expires_at_unix),
+            Err(ReviewError::Expired)
+        );
         policy.intent_sha256 = [0; 32];
-        assert_eq!(assess_review(&policy, &records, 1_780_000_300), Err(ReviewError::InvalidPolicy));
+        assert_eq!(
+            assess_review(&policy, &records, 1_780_000_300),
+            Err(ReviewError::InvalidPolicy)
+        );
         policy.intent_sha256 = [7; 32];
         records[0].recorded_at_unix = 1_780_000_400;
-        assert_eq!(assess_review(&policy, &records, 1_780_000_300), Err(ReviewError::InvalidRecord));
+        assert_eq!(
+            assess_review(&policy, &records, 1_780_000_300),
+            Err(ReviewError::InvalidRecord)
+        );
     }
 }

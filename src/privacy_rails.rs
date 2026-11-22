@@ -120,7 +120,8 @@ pub fn describe_rail_adapter(rail: PrivacyArchitectureKind) -> PrivacyRailAdapte
             evaluated_for: Some(ProductSegment::Personal),
             upstream_repository: Some("https://github.com/NethermindEth/stellar-private-payments"),
             pinned_commit_or_tag: Some("cebb972b5872cba3a1cc40bcdfab297168ccc1d7"),
-            license_model: "Apache-2.0 workspace; circomlib LGPL-3.0 + circuit-compiler GPL-3.0 artifacts",
+            license_model:
+                "Apache-2.0 workspace; circomlib LGPL-3.0 + circuit-compiler GPL-3.0 artifacts",
             required_soroban_sdk: Some("28.x (BN254 pairing host)"),
             production_ready: false,
             execution_enabled: false,
@@ -178,7 +179,8 @@ pub fn evaluate_rail_preflight(req: &PrivacyRailPreflightRequest) -> PrivacyRail
         reasons.push(RailBlockReason::AssetNotExactTransferSep41);
     }
     reasons.push(RailBlockReason::SorobanRuntimeMismatch);
-    if req.account_created_ledger < req.rpc_oldest_retained_ledger && !req.durable_indexer_available {
+    if req.account_created_ledger < req.rpc_oldest_retained_ledger && !req.durable_indexer_available
+    {
         reasons.push(RailBlockReason::LedgerHistoryPrunedWithoutIndexer);
     }
     if !req.recovery_seed_backed_up {
@@ -260,7 +262,9 @@ mod tests {
             sac_pool_frozen_or_shortfall: false,
         });
         assert!(!swap.architecturally_eligible);
-        assert!(swap.block_reasons.contains(&RailBlockReason::RailSegmentMismatch));
+        assert!(swap
+            .block_reasons
+            .contains(&RailBlockReason::RailSegmentMismatch));
     }
 
     #[test]

@@ -21,8 +21,18 @@ pub struct PlatformCatalog {
     pub modules: Vec<PlatformModule>,
 }
 
-fn module(id: &'static str, audiences: &'static [&'static str], availability: &'static str, description: &'static str) -> PlatformModule {
-    PlatformModule { id, audiences, availability, description }
+fn module(
+    id: &'static str,
+    audiences: &'static [&'static str],
+    availability: &'static str,
+    description: &'static str,
+) -> PlatformModule {
+    PlatformModule {
+        id,
+        audiences,
+        availability,
+        description,
+    }
 }
 
 /// This inventory intentionally reports *capability scope*, never eligibility,
@@ -35,17 +45,72 @@ pub fn catalog() -> PlatformCatalog {
         privacy_verified: false,
         mainnet_enabled: false,
         modules: vec![
-            module("wallet", &["consumer", "business"], "planned", "Wallet connection exists in the preview; authenticated signing is unavailable."),
-            module("corridors", &["consumer", "business", "developer", "partner"], "metadata-only", "Operator-configured database catalog; not a live payout or quote."),
-            module("quotes", &["consumer", "business", "developer"], "blocked", "No approved FX or liquidity quote providers."),
-            module("payments", &["consumer", "business", "developer"], "blocked", "No independently verified confidential transfer execution."),
-            module("batch-payouts", &["business", "developer"], "blocked", "Batch signing and payout authorization are not available."),
-            module("approvals", &["business"], "planned", "Tenant-scoped role enforcement and signed approvals are pending."),
-            module("reconciliation", &["business", "developer", "partner"], "planned", "Read-model design exists; independent payout reconciliation is pending."),
-            module("webhooks", &["business", "developer", "partner"], "planned", "Signed callback validation primitives are not a public delivery service."),
-            module("privacy-proofs", &["consumer", "business", "developer"], "blocked", "Neither confidential rail has independent deployment and proof evidence."),
-            module("disclosure", &["business", "partner"], "planned", "Selective disclosure requires reviewed cryptographic and legal controls."),
-            module("partner-settlement", &["business", "partner"], "blocked", "Licensed fiat partners and settlement acknowledgements are unverified."),
+            module(
+                "wallet",
+                &["consumer", "business"],
+                "planned",
+                "Wallet connection exists in the preview; authenticated signing is unavailable.",
+            ),
+            module(
+                "corridors",
+                &["consumer", "business", "developer", "partner"],
+                "metadata-only",
+                "Operator-configured database catalog; not a live payout or quote.",
+            ),
+            module(
+                "quotes",
+                &["consumer", "business", "developer"],
+                "blocked",
+                "No approved FX or liquidity quote providers.",
+            ),
+            module(
+                "payments",
+                &["consumer", "business", "developer"],
+                "blocked",
+                "No independently verified confidential transfer execution.",
+            ),
+            module(
+                "batch-payouts",
+                &["business", "developer"],
+                "blocked",
+                "Batch signing and payout authorization are not available.",
+            ),
+            module(
+                "approvals",
+                &["business"],
+                "planned",
+                "Tenant-scoped role enforcement and signed approvals are pending.",
+            ),
+            module(
+                "reconciliation",
+                &["business", "developer", "partner"],
+                "planned",
+                "Read-model design exists; independent payout reconciliation is pending.",
+            ),
+            module(
+                "webhooks",
+                &["business", "developer", "partner"],
+                "planned",
+                "Signed callback validation primitives are not a public delivery service.",
+            ),
+            module(
+                "privacy-proofs",
+                &["consumer", "business", "developer"],
+                "blocked",
+                "Neither confidential rail has independent deployment and proof evidence.",
+            ),
+            module(
+                "disclosure",
+                &["business", "partner"],
+                "planned",
+                "Selective disclosure requires reviewed cryptographic and legal controls.",
+            ),
+            module(
+                "partner-settlement",
+                &["business", "partner"],
+                "blocked",
+                "Licensed fiat partners and settlement acknowledgements are unverified.",
+            ),
         ],
     }
 }
@@ -72,7 +137,10 @@ mod tests {
         for item in inventory.modules {
             assert!(ids.insert(item.id), "duplicate module");
             assert!(!item.audiences.is_empty());
-            assert!(matches!(item.availability, "metadata-only" | "planned" | "blocked"));
+            assert!(matches!(
+                item.availability,
+                "metadata-only" | "planned" | "blocked"
+            ));
             assert!(!item.description.is_empty());
             if item.availability == "metadata-only" {
                 assert_eq!(item.id, "corridors");

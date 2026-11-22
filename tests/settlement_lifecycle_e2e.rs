@@ -142,7 +142,12 @@ async fn end_to_end_settlement_lifecycle_postgres_sdk_and_optional_live_testnet(
 
     // Unauthenticated access rejected
     assert_eq!(
-        client.get(format!("{base}{PATH}")).send().await.unwrap().status(),
+        client
+            .get(format!("{base}{PATH}"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
         401
     );
 
@@ -153,7 +158,8 @@ async fn end_to_end_settlement_lifecycle_postgres_sdk_and_optional_live_testnet(
         .await
         .unwrap();
     let fp = hex::encode(Sha256::digest(
-        format!("StealthBridge route snapshot v1\n{corridor}\nUS\nDE\nUSDC\n\nprivate-payments\n").as_bytes(),
+        format!("StealthBridge route snapshot v1\n{corridor}\nUS\nDE\nUSDC\n\nprivate-payments\n")
+            .as_bytes(),
     ));
 
     let s1 = Uuid::new_v4();
@@ -199,11 +205,18 @@ async fn end_to_end_settlement_lifecycle_postgres_sdk_and_optional_live_testnet(
     let mut bad_mut = serde_json::from_str::<Value>(&create_body).unwrap();
     bad_mut["amount_minor_units"] = json!(9_999_999);
     assert_eq!(
-        signed(&client, &base, &owner, "PUT", &bad_mut.to_string(), Uuid::new_v4())
-            .send()
-            .await
-            .unwrap()
-            .status(),
+        signed(
+            &client,
+            &base,
+            &owner,
+            "PUT",
+            &bad_mut.to_string(),
+            Uuid::new_v4()
+        )
+        .send()
+        .await
+        .unwrap()
+        .status(),
         409
     );
 
@@ -216,22 +229,36 @@ async fn end_to_end_settlement_lifecycle_postgres_sdk_and_optional_live_testnet(
     })
     .to_string();
     assert_eq!(
-        signed(&client, &base, other, "POST", &verify_policy, Uuid::new_v4())
-            .send()
-            .await
-            .unwrap()
-            .status(),
+        signed(
+            &client,
+            &base,
+            other,
+            "POST",
+            &verify_policy,
+            Uuid::new_v4()
+        )
+        .send()
+        .await
+        .unwrap()
+        .status(),
         409
     );
 
     // Stage 5: Verify policy -> revision 5
-    let r5: Value = signed(&client, &base, &owner, "POST", &verify_policy, Uuid::new_v4())
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let r5: Value = signed(
+        &client,
+        &base,
+        &owner,
+        "POST",
+        &verify_policy,
+        Uuid::new_v4(),
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
     assert_eq!(r5["state"], "policy_verified");
     assert_eq!(r5["revision"], 5);
 
@@ -348,7 +375,8 @@ async fn end_to_end_settlement_lifecycle_postgres_sdk_and_optional_live_testnet(
             &base,
             &owner,
             "POST",
-            &json!({"action":"submit_tx","id":s2,"expected_revision":6,"testnet_tx_hash":live_tx}).to_string(),
+            &json!({"action":"submit_tx","id":s2,"expected_revision":6,"testnet_tx_hash":live_tx})
+                .to_string(),
             Uuid::new_v4(),
         )
         .send()
@@ -445,18 +473,22 @@ async fn end_to_end_settlement_lifecycle_postgres_sdk_and_optional_live_testnet(
 
     // Cleanup test fixtures cleanly
     for id in [s1, s2] {
-        sqlx::query("DELETE FROM account_settlement_outbox WHERE account_address=$1 AND settlement_id=$2")
-            .bind(&owner)
-            .bind(id)
-            .execute(&db)
-            .await
-            .unwrap();
-        sqlx::query("DELETE FROM account_settlement_events WHERE account_address=$1 AND settlement_id=$2")
-            .bind(&owner)
-            .bind(id)
-            .execute(&db)
-            .await
-            .unwrap();
+        sqlx::query(
+            "DELETE FROM account_settlement_outbox WHERE account_address=$1 AND settlement_id=$2",
+        )
+        .bind(&owner)
+        .bind(id)
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "DELETE FROM account_settlement_events WHERE account_address=$1 AND settlement_id=$2",
+        )
+        .bind(&owner)
+        .bind(id)
+        .execute(&db)
+        .await
+        .unwrap();
         sqlx::query("DELETE FROM account_settlement_lifecycles WHERE account_address=$1 AND id=$2")
             .bind(&owner)
             .bind(id)

@@ -3,8 +3,8 @@
 //! an enable action; operator verification is a separate reviewed process.
 use sqlx::postgres::PgPoolOptions;
 use std::{env, process, time::Duration};
-use uuid::Uuid;
 use stealthbridge_backend::wallet::decode_account_address;
+use uuid::Uuid;
 
 #[derive(Debug, PartialEq, Eq)]
 struct Candidate {
@@ -23,16 +23,18 @@ fn parse_candidate(values: &[String]) -> Result<Candidate, &'static str> {
     if !country(&values[0]) || !country(&values[1]) || values[0] == values[1] {
         return Err("countries must be different two-letter uppercase ISO country codes");
     }
-    if values[2].is_empty() || values[2].len() > 64
-        || !values[2].bytes().all(|b| b.is_ascii_alphanumeric() || b"_-:".contains(&b))
+    if values[2].is_empty()
+        || values[2].len() > 64
+        || !values[2]
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_-:".contains(&b))
     {
         return Err("asset code must contain 1-64 ASCII letters, numbers, _, - or :");
     }
     // Syntax screening only, not issuer authorization, asset existence or token verification.
     let issuer = if values[3] == "-" {
         None
-    } else if decode_account_address(&values[3]).is_some()
-    {
+    } else if decode_account_address(&values[3]).is_some() {
         Some(values[3].clone())
     } else {
         return Err("issuer must be '-' or a checksum-valid classic Stellar G-address");
@@ -71,8 +73,11 @@ async fn main() {
             process::exit(2);
         }
     };
-    let pool = match PgPoolOptions::new().max_connections(1)
-        .acquire_timeout(Duration::from_secs(8)).connect(&url).await
+    let pool = match PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(8))
+        .connect(&url)
+        .await
     {
         Ok(pool) => pool,
         Err(_) => {
@@ -95,7 +100,9 @@ async fn main() {
     .await;
     pool.close().await;
     match result {
-        Ok(_) => println!("Candidate {id} registered with enabled=false; invisible to public discovery."),
+        Ok(_) => {
+            println!("Candidate {id} registered with enabled=false; invisible to public discovery.")
+        }
         Err(_) => {
             eprintln!("Corridor registration failed; no public capability was enabled.");
             process::exit(1);
@@ -107,8 +114,16 @@ async fn main() {
 mod tests {
     use super::*;
     fn valid() -> Vec<String> {
-        ["NG", "GH", "USDC", "GAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB7JZX", "confidential-token"]
-            .into_iter().map(str::to_owned).collect()
+        [
+            "NG",
+            "GH",
+            "USDC",
+            "GAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB7JZX",
+            "confidential-token",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
     }
 
     #[test]

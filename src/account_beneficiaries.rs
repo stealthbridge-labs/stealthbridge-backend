@@ -86,7 +86,9 @@ fn valid_label(label: &str) -> bool {
     let chars = label.chars().count();
     (1..=48).contains(&chars)
         && label.trim() == label
-        && !label.chars().any(|c| c.is_control() || c == '<' || c == '>')
+        && !label
+            .chars()
+            .any(|c| c.is_control() || c == '<' || c == '>')
 }
 
 fn valid_flow(flow: &str) -> bool {
@@ -121,7 +123,8 @@ fn row_to_record(row: sqlx::postgres::PgRow) -> Result<BeneficiaryRecord, sqlx::
     })
 }
 
-const SELECT_ALL: &str = "SELECT id, recipient_address, recipient_kind, label, flow, created_at_unix, updated_at_unix
+const SELECT_ALL: &str =
+    "SELECT id, recipient_address, recipient_kind, label, flow, created_at_unix, updated_at_unix
  FROM account_beneficiaries
  WHERE account_address=$1
  ORDER BY updated_at_unix DESC, id DESC
@@ -254,14 +257,13 @@ async fn run_delete(
         return Ok(None);
     }
 
-    let affected = sqlx::query(
-        "DELETE FROM account_beneficiaries WHERE account_address=$1 AND id=$2",
-    )
-    .bind(account)
-    .bind(id)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
+    let affected =
+        sqlx::query("DELETE FROM account_beneficiaries WHERE account_address=$1 AND id=$2")
+            .bind(account)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
     if affected != 1 {
         return Ok(None);
     }
@@ -297,10 +299,7 @@ pub async fn upsert(
     let Ok(payload) = serde_json::from_slice::<UpsertBeneficiary>(&body) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    if payload.id.is_nil()
-        || !valid_label(&payload.label)
-        || !valid_flow(&payload.flow)
-    {
+    if payload.id.is_nil() || !valid_label(&payload.label) || !valid_flow(&payload.flow) {
         return StatusCode::BAD_REQUEST.into_response();
     }
     let Some(parsed_addr) = wallet::parse_canonical_stellar_address(&payload.recipient_address)
@@ -385,7 +384,10 @@ mod tests {
         std::env::set_var("STEALTHBRIDGE_ACCOUNT_BENEFICIARIES_ENABLED", "true");
         let url = std::env::var("DATABASE_URL").expect("CI PostgreSQL");
         let pool = PgPool::connect(&url).await.expect("connect");
-        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
 
         let account = "GC3YRVLB7IN7SNUYVWFUC6OD3QWJXCUZ4HOBNIPVGY7BZDVOYMDNX5TN";
         let w_recipient = "WDS6HBE6YJSZTRG3VR2HLCNHWJZMKB43BLFFEHEH3Z76WXAF46LW6AAAAAAAAAAAFKW6A";
@@ -403,7 +405,8 @@ mod tests {
             } else {
                 hex::encode(Sha256::digest(body.as_bytes()))
             };
-            let text = format!("{DOMAIN}\n{method}\n{PATH}\n{account}\n{stamp}\n{nonce}\n{digest}\n");
+            let text =
+                format!("{DOMAIN}\n{method}\n{PATH}\n{account}\n{stamp}\n{nonce}\n{digest}\n");
             let mut mac = Hmac::<Sha256>::new_from_slice(key).unwrap();
             mac.update(text.as_bytes());
             let sig = hex::encode(mac.finalize().into_bytes());

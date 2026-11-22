@@ -34,7 +34,9 @@ async fn main() {
     let result = sqlx::migrate!("./migrations").run(&pool).await;
     pool.close().await;
     match result {
-        Ok(()) => println!("PostgreSQL schema migrations applied successfully; no corridors seeded."),
+        Ok(()) => {
+            println!("PostgreSQL schema migrations applied successfully; no corridors seeded.")
+        }
         Err(_) => {
             eprintln!("Migration failed; check the existing schema and migration history before retrying.");
             process::exit(1);

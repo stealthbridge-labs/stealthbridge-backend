@@ -1,7 +1,7 @@
 //! Testnet-only durable ledger-head cursor for an opt-in read-only observer.
 //! A stored ledger head is not a payment event, payout, or private proof.
 use serde::Serialize;
-use sqlx::{PgPool, Row, PgConnection};
+use sqlx::{PgConnection, PgPool, Row};
 
 const TESTNET_PASSPHRASE: &str = "Test SDF Network ; September 2015";
 
@@ -22,33 +22,56 @@ pub struct LedgerCheckpoint {
 impl LedgerCheckpoint {
     /// Check persisted values before exposing them as an actual public ledger
     /// observation. A stale checkpoint is still a record, never a live claim.
-    pub fn validate_for_display(&self)->bool {
-        self.ledger_sequence>0 && self.ledger_sequence<=i64::MAX as u64 &&
-        self.ledger_hash.len()==64 &&
-        self.ledger_hash.bytes().all(|b|b.is_ascii_hexdigit()) &&
-        !self.ledger_closed_at_unix.is_empty() &&
-        self.ledger_closed_at_unix.len()<=20 &&
-        self.ledger_closed_at_unix.bytes().all(|b|b.is_ascii_digit()) &&
-        self.ledger_closed_at_unix.parse::<u64>().is_ok_and(|n|n>0) &&
-        self.source=="stellar-rpc"
+    pub fn validate_for_display(&self) -> bool {
+        self.ledger_sequence > 0
+            && self.ledger_sequence <= i64::MAX as u64
+            && self.ledger_hash.len() == 64
+            && self.ledger_hash.bytes().all(|b| b.is_ascii_hexdigit())
+            && !self.ledger_closed_at_unix.is_empty()
+            && self.ledger_closed_at_unix.len() <= 20
+            && self
+                .ledger_closed_at_unix
+                .bytes()
+                .all(|b| b.is_ascii_digit())
+            && self
+                .ledger_closed_at_unix
+                .parse::<u64>()
+                .is_ok_and(|n| n > 0)
+            && self.source == "stellar-rpc"
     }
 }
 #[derive(Debug, PartialEq, Eq)]
-pub enum CheckpointChange { Inserted, Advanced, Unchanged, Stale }
+pub enum CheckpointChange {
+    Inserted,
+    Advanced,
+    Unchanged,
+    Stale,
+}
 #[derive(Debug)]
-pub enum LedgerError { InvalidHead, ConflictingHash, Storage(sqlx::Error) }
+pub enum LedgerError {
+    InvalidHead,
+    ConflictingHash,
+    Storage(sqlx::Error),
+}
 impl From<sqlx::Error> for LedgerError {
-    fn from(error: sqlx::Error) -> Self { Self::Storage(error) }
+    fn from(error: sqlx::Error) -> Self {
+        Self::Storage(error)
+    }
 }
 impl VerifiedHead {
     pub fn validate(&self) -> Result<(), LedgerError> {
-        if self.passphrase != TESTNET_PASSPHRASE || self.ledger_sequence == 0 ||
-            self.ledger_sequence > i64::MAX as u64 ||
-            self.ledger_hash.len() != 64 ||
-            !self.ledger_hash.bytes().all(|b| b.is_ascii_hexdigit()) ||
-            self.ledger_closed_at_unix.is_empty() ||
-            self.ledger_closed_at_unix.len() > 20 ||
-            !self.ledger_closed_at_unix.bytes().all(|b| b.is_ascii_digit()) {
+        if self.passphrase != TESTNET_PASSPHRASE
+            || self.ledger_sequence == 0
+            || self.ledger_sequence > i64::MAX as u64
+            || self.ledger_hash.len() != 64
+            || !self.ledger_hash.bytes().all(|b| b.is_ascii_hexdigit())
+            || self.ledger_closed_at_unix.is_empty()
+            || self.ledger_closed_at_unix.len() > 20
+            || !self
+                .ledger_closed_at_unix
+                .bytes()
+                .all(|b| b.is_ascii_digit())
+        {
             return Err(LedgerError::InvalidHead);
         }
         Ok(())
@@ -79,11 +102,14 @@ pub async fn release_observer_lease(connection: &mut PgConnection) -> Result<boo
 
 /// Transactional monotonic checkpointing; a same-sequence hash disagreement is
 /// always surfaced for operator investigation, never silently overwritten.
-pub async fn record_head(pool: &PgPool, head: &VerifiedHead) -> Result<CheckpointChange, LedgerError> {
+pub async fn record_head(
+    pool: &PgPool,
+    head: &VerifiedHead,
+) -> Result<CheckpointChange, LedgerError> {
     head.validate()?;
-    let mut tx=pool.begin().await?;
-    let seq=head.ledger_sequence as i64;
-    let hash=head.ledger_hash.to_ascii_lowercase();
+    let mut tx = pool.begin().await?;
+    let seq = head.ledger_sequence as i64;
+    let hash = head.ledger_hash.to_ascii_lowercase();
     let inserted=sqlx::query(
         "INSERT INTO stellar_ledger_observer (network,source,ledger_sequence,ledger_hash,close_time_unix) \
          VALUES ('testnet','stellar-rpc',$1,$2,$3) \
@@ -94,70 +120,92 @@ pub async fn record_head(pool: &PgPool, head: &VerifiedHead) -> Result<Checkpoin
         tx.commit().await?;
         return Ok(CheckpointChange::Inserted);
     }
-    let row=sqlx::query(
+    let row = sqlx::query(
         "SELECT ledger_sequence,ledger_hash FROM stellar_ledger_observer \
-         WHERE network='testnet' AND source='stellar-rpc' FOR UPDATE"
-    ).fetch_one(&mut *tx).await?;
-    let existing_seq:i64=row.try_get("ledger_sequence")?;
-    let existing_hash:String=row.try_get("ledger_hash")?;
-    if seq==existing_seq && hash!=existing_hash {
+         WHERE network='testnet' AND source='stellar-rpc' FOR UPDATE",
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    let existing_seq: i64 = row.try_get("ledger_sequence")?;
+    let existing_hash: String = row.try_get("ledger_hash")?;
+    if seq == existing_seq && hash != existing_hash {
         return Err(LedgerError::ConflictingHash);
     }
-    if seq<existing_seq {return Ok(CheckpointChange::Stale);}
-    if seq==existing_seq {return Ok(CheckpointChange::Unchanged);}
+    if seq < existing_seq {
+        return Ok(CheckpointChange::Stale);
+    }
+    if seq == existing_seq {
+        return Ok(CheckpointChange::Unchanged);
+    }
     sqlx::query(
         "UPDATE stellar_ledger_observer SET ledger_sequence=$1,ledger_hash=$2,close_time_unix=$3, \
-         observed_at=now() WHERE network='testnet' AND source='stellar-rpc'"
-    ).bind(seq).bind(&hash).bind(&head.ledger_closed_at_unix)
-        .execute(&mut *tx).await?;
+         observed_at=now() WHERE network='testnet' AND source='stellar-rpc'",
+    )
+    .bind(seq)
+    .bind(&hash)
+    .bind(&head.ledger_closed_at_unix)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     Ok(CheckpointChange::Advanced)
 }
 
 /// Last persisted read-only observation; absence is not silently replaced with
 /// latest network data or a simulated ledger.
-pub async fn last_head(pool:&PgPool)->Result<Option<LedgerCheckpoint>,sqlx::Error>{
-    let row=sqlx::query(
+pub async fn last_head(pool: &PgPool) -> Result<Option<LedgerCheckpoint>, sqlx::Error> {
+    let row = sqlx::query(
         "SELECT ledger_sequence,ledger_hash,close_time_unix FROM stellar_ledger_observer \
-         WHERE network='testnet' AND source='stellar-rpc'"
-    ).fetch_optional(pool).await?;
+         WHERE network='testnet' AND source='stellar-rpc'",
+    )
+    .fetch_optional(pool)
+    .await?;
     match row {
-        Some(row)=>{
-            let ledger_sequence:i64=row.try_get("ledger_sequence")?;
-            if ledger_sequence<=0 {
-                return Err(sqlx::Error::Decode("Invalid persisted ledger sequence".into()));
+        Some(row) => {
+            let ledger_sequence: i64 = row.try_get("ledger_sequence")?;
+            if ledger_sequence <= 0 {
+                return Err(sqlx::Error::Decode(
+                    "Invalid persisted ledger sequence".into(),
+                ));
             }
-            let checkpoint=LedgerCheckpoint {
-                ledger_sequence:ledger_sequence as u64,
-                ledger_hash:row.try_get("ledger_hash")?,
-                ledger_closed_at_unix:row.try_get("close_time_unix")?,
-                source:"stellar-rpc",
+            let checkpoint = LedgerCheckpoint {
+                ledger_sequence: ledger_sequence as u64,
+                ledger_hash: row.try_get("ledger_hash")?,
+                ledger_closed_at_unix: row.try_get("close_time_unix")?,
+                source: "stellar-rpc",
             };
-            if !checkpoint.validate_for_display(){
-                return Err(sqlx::Error::Decode("Invalid persisted observer checkpoint".into()));
+            if !checkpoint.validate_for_display() {
+                return Err(sqlx::Error::Decode(
+                    "Invalid persisted observer checkpoint".into(),
+                ));
             }
             Ok(Some(checkpoint))
         }
-        None=>Ok(None),
+        None => Ok(None),
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn fixture()->VerifiedHead {
+    fn fixture() -> VerifiedHead {
         VerifiedHead {
-            passphrase:TESTNET_PASSPHRASE.to_owned(),
-            ledger_sequence:42,
-            ledger_hash:"0".repeat(64),
-            ledger_closed_at_unix:"1760000000".to_owned(),
+            passphrase: TESTNET_PASSPHRASE.to_owned(),
+            ledger_sequence: 42,
+            ledger_hash: "0".repeat(64),
+            ledger_closed_at_unix: "1760000000".to_owned(),
         }
     }
     #[tokio::test]
     async fn observer_advisory_lease_is_exclusive_and_recoverable_after_release() {
         use sqlx::Connection;
-        let Some(database_url)=std::env::var("DATABASE_URL").ok() else {return;};
-        let mut first=PgConnection::connect(&database_url).await.expect("first isolated connection");
-        let mut competing=PgConnection::connect(&database_url).await.expect("competing isolated connection");
+        let Some(database_url) = std::env::var("DATABASE_URL").ok() else {
+            return;
+        };
+        let mut first = PgConnection::connect(&database_url)
+            .await
+            .expect("first isolated connection");
+        let mut competing = PgConnection::connect(&database_url)
+            .await
+            .expect("competing isolated connection");
         assert!(try_observer_lease(&mut first).await.unwrap());
         assert!(!try_observer_lease(&mut competing).await.unwrap());
         assert!(release_observer_lease(&mut first).await.unwrap());
@@ -167,39 +215,59 @@ mod tests {
         // PostgreSQL releases any remaining session-level lease.
         assert!(try_observer_lease(&mut first).await.unwrap());
         first.close().await.expect("close failed worker session");
-        let mut resumed=PgConnection::connect(&database_url).await.unwrap();
+        let mut resumed = PgConnection::connect(&database_url).await.unwrap();
         assert!(try_observer_lease(&mut resumed).await.unwrap());
         assert!(release_observer_lease(&mut resumed).await.unwrap());
     }
 
     #[test]
-    fn persisted_observer_checkpoints_are_never_trusted_without_validation(){
-        let good=LedgerCheckpoint{
-            ledger_sequence:44,
-            ledger_hash:"a".repeat(64),
-            ledger_closed_at_unix:"1760000020".into(),
-            source:"stellar-rpc",
+    fn persisted_observer_checkpoints_are_never_trusted_without_validation() {
+        let good = LedgerCheckpoint {
+            ledger_sequence: 44,
+            ledger_hash: "a".repeat(64),
+            ledger_closed_at_unix: "1760000020".into(),
+            source: "stellar-rpc",
         };
         assert!(good.validate_for_display());
         for candidate in [
-            LedgerCheckpoint{ledger_sequence:0,..good.clone()},
-            LedgerCheckpoint{ledger_hash:"not-a-hash".into(),..good.clone()},
-            LedgerCheckpoint{ledger_closed_at_unix:"2026-10-15".into(),..good.clone()},
-            LedgerCheckpoint{ledger_closed_at_unix:"0".into(),..good.clone()},
-            LedgerCheckpoint{ledger_closed_at_unix:"99999999999999999999".into(),..good.clone()},
-        ]{assert!(!candidate.validate_for_display());}
+            LedgerCheckpoint {
+                ledger_sequence: 0,
+                ..good.clone()
+            },
+            LedgerCheckpoint {
+                ledger_hash: "not-a-hash".into(),
+                ..good.clone()
+            },
+            LedgerCheckpoint {
+                ledger_closed_at_unix: "2026-10-15".into(),
+                ..good.clone()
+            },
+            LedgerCheckpoint {
+                ledger_closed_at_unix: "0".into(),
+                ..good.clone()
+            },
+            LedgerCheckpoint {
+                ledger_closed_at_unix: "99999999999999999999".into(),
+                ..good.clone()
+            },
+        ] {
+            assert!(!candidate.validate_for_display());
+        }
     }
     #[test]
     fn fails_closed_on_network_or_untrustworthy_hash() {
         assert!(fixture().validate().is_ok());
-        let mut bad=fixture();
-        bad.passphrase="Public Global Stellar Network ; September 2015".to_owned();
-        assert!(matches!(bad.validate(),Err(LedgerError::InvalidHead)));
-        bad=fixture(); bad.ledger_hash="g".repeat(64);
-        assert!(matches!(bad.validate(),Err(LedgerError::InvalidHead)));
-        bad=fixture(); bad.ledger_sequence=0;
-        assert!(matches!(bad.validate(),Err(LedgerError::InvalidHead)));
-        bad=fixture(); bad.ledger_closed_at_unix="yesterday".to_owned();
-        assert!(matches!(bad.validate(),Err(LedgerError::InvalidHead)));
+        let mut bad = fixture();
+        bad.passphrase = "Public Global Stellar Network ; September 2015".to_owned();
+        assert!(matches!(bad.validate(), Err(LedgerError::InvalidHead)));
+        bad = fixture();
+        bad.ledger_hash = "g".repeat(64);
+        assert!(matches!(bad.validate(), Err(LedgerError::InvalidHead)));
+        bad = fixture();
+        bad.ledger_sequence = 0;
+        assert!(matches!(bad.validate(), Err(LedgerError::InvalidHead)));
+        bad = fixture();
+        bad.ledger_closed_at_unix = "yesterday".to_owned();
+        assert!(matches!(bad.validate(), Err(LedgerError::InvalidHead)));
     }
 }

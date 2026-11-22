@@ -2,14 +2,17 @@
 //! Fixtures are test-only: no live corridor, issuer, provider, or fiat payouts.
 use serde_json::Value;
 use sqlx::PgPool;
-use stealthbridge_backend::server::{router,AppState};
+use stealthbridge_backend::server::{router, AppState};
 use uuid::Uuid;
 
 #[tokio::test]
 async fn pages_are_ordered_bounded_and_never_invent_provider_data() {
-    let url=std::env::var("DATABASE_URL").expect("isolated PostgreSQL service required");
-    let pool=PgPool::connect(&url).await.expect("open database");
-    sqlx::migrate!("./migrations").run(&pool).await.expect("migrations");
+    let url = std::env::var("DATABASE_URL").expect("isolated PostgreSQL service required");
+    let pool = PgPool::connect(&url).await.expect("open database");
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .expect("migrations");
 
     // Malformed real-world corridor metadata must fail at the database boundary,
     // even if an operator bypasses the application and directly executes SQL.
@@ -22,10 +25,9 @@ async fn pages_are_ordered_bounded_and_never_invent_provider_data() {
         "INSERT INTO corridors (id,origin_country,destination_country,asset_code,asset_issuer,privacy_rail) VALUES ($1,'NG','GH','USDC','','confidential-token')"
     ).bind(bad_issuer).execute(&pool).await.is_err());
 
-
-    let mut fixtures=Vec::new();
+    let mut fixtures = Vec::new();
     for _ in 0..5 {
-        let id=Uuid::new_v4();
+        let id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO corridors (id,origin_country,destination_country,asset_code,privacy_rail,enabled) \
              VALUES ($1,'AA','BB','TEST_FIXTURE','confidential-token',TRUE)"
@@ -45,32 +47,44 @@ async fn pages_are_ordered_bounded_and_never_invent_provider_data() {
     .await
     .expect("filtered test fixture");
     fixtures.push(filtered_id);
-    let state=AppState::from_env().await.expect("Testnet configuration + DB");
-    let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("local listener");
-    let addr=listener.local_addr().expect("bound address");
-    let server=tokio::spawn(async move {
-        axum::serve(listener,router(state)).await.expect("local server");
+    let state = AppState::from_env()
+        .await
+        .expect("Testnet configuration + DB");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("local listener");
+    let addr = listener.local_addr().expect("bound address");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router(state))
+            .await
+            .expect("local server");
     });
-    let client=reqwest::Client::new();
-    let base=format!("http://{addr}");
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}");
 
-    let first=client.get(format!("{base}/v1/corridors/page?limit=2"))
-        .send().await.expect("first page");
-    assert_eq!(first.status(),reqwest::StatusCode::OK);
-    let page:Value=first.json().await.expect("page JSON");
-    assert_eq!(page["items"].as_array().expect("items").len(),2);
-    let cursor=page["next_cursor"].as_str().expect("next cursor");
+    let first = client
+        .get(format!("{base}/v1/corridors/page?limit=2"))
+        .send()
+        .await
+        .expect("first page");
+    assert_eq!(first.status(), reqwest::StatusCode::OK);
+    let page: Value = first.json().await.expect("page JSON");
+    assert_eq!(page["items"].as_array().expect("items").len(), 2);
+    let cursor = page["next_cursor"].as_str().expect("next cursor");
     assert!(Uuid::parse_str(cursor).is_ok());
 
-    let second=client.get(format!("{base}/v1/corridors/page?limit=2&after={cursor}"))
-        .send().await.expect("second page");
-    assert_eq!(second.status(),reqwest::StatusCode::OK);
-    let next:Value=second.json().await.expect("second page JSON");
-    let items=next["items"].as_array().expect("items");
-    assert_eq!(items.len(),2);
+    let second = client
+        .get(format!("{base}/v1/corridors/page?limit=2&after={cursor}"))
+        .send()
+        .await
+        .expect("second page");
+    assert_eq!(second.status(), reqwest::StatusCode::OK);
+    let next: Value = second.json().await.expect("second page JSON");
+    let items = next["items"].as_array().expect("items");
+    assert_eq!(items.len(), 2);
     for item in items {
-        let id=Uuid::parse_str(item["id"].as_str().expect("UUID")).expect("valid UUID");
-        assert!(id>Uuid::parse_str(cursor).expect("valid cursor"));
+        let id = Uuid::parse_str(item["id"].as_str().expect("UUID")).expect("valid UUID");
+        assert!(id > Uuid::parse_str(cursor).expect("valid cursor"));
         assert!(item.get("payout_provider").is_none());
         assert!(item.get("fx_quote").is_none());
     }
@@ -78,23 +92,26 @@ async fn pages_are_ordered_bounded_and_never_invent_provider_data() {
         "{base}/v1/corridors/page?origin_country=ZA&destination_country=KE&privacy_rail=private-payments&limit=100"
     ))
     .send().await.expect("filtered page");
-    assert_eq!(only_filtered.status(),reqwest::StatusCode::OK);
-    let filtered:Value=only_filtered.json().await.expect("filtered JSON");
-    let filtered_rows=filtered["items"].as_array().expect("filtered array");
-    assert!(filtered_rows.iter().any(|row|row["id"]==filtered_id.to_string()));
-    assert!(filtered_rows.iter().all(|row|
-        row["origin_country"]=="ZA" && row["destination_country"]=="KE"
-            && row["privacy_rail"]=="private-payments"
-    ));
+    assert_eq!(only_filtered.status(), reqwest::StatusCode::OK);
+    let filtered: Value = only_filtered.json().await.expect("filtered JSON");
+    let filtered_rows = filtered["items"].as_array().expect("filtered array");
+    assert!(filtered_rows
+        .iter()
+        .any(|row| row["id"] == filtered_id.to_string()));
+    assert!(filtered_rows.iter().all(|row| row["origin_country"] == "ZA"
+        && row["destination_country"] == "KE"
+        && row["privacy_rail"] == "private-payments"));
     let first_filtered=client.get(format!(
         "{base}/v1/corridors/page?origin_country=AA&destination_country=BB&privacy_rail=confidential-token&limit=2"
     )).send().await.expect("filtered keyset page");
-    assert_eq!(first_filtered.status(),reqwest::StatusCode::OK);
-    let page:Value=first_filtered.json().await.expect("filtered keyset JSON");
-    assert_eq!(page["items"].as_array().unwrap().len(),2);
-    assert!(page["items"].as_array().unwrap().iter().all(|row|
-        row["origin_country"]=="AA" && row["destination_country"]=="BB"
-    ));
+    assert_eq!(first_filtered.status(), reqwest::StatusCode::OK);
+    let page: Value = first_filtered.json().await.expect("filtered keyset JSON");
+    assert_eq!(page["items"].as_array().unwrap().len(), 2);
+    assert!(page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["origin_country"] == "AA" && row["destination_country"] == "BB"));
     for query in [
         "origin_country=ng",
         "origin_country=USA",
@@ -103,22 +120,43 @@ async fn pages_are_ordered_bounded_and_never_invent_provider_data() {
         "privacy_rail=live-payout",
         "privacy_rail=PRIVATE-PAYMENTS",
     ] {
-        let result=client.get(format!("{base}/v1/corridors/page?{query}"))
-            .send().await.expect("bad metadata filter response");
-        assert_eq!(result.status(),reqwest::StatusCode::BAD_REQUEST, "{query}");
+        let result = client
+            .get(format!("{base}/v1/corridors/page?{query}"))
+            .send()
+            .await
+            .expect("bad metadata filter response");
+        assert_eq!(result.status(), reqwest::StatusCode::BAD_REQUEST, "{query}");
     }
-    for query in ["limit=0","limit=101","limit=not_a_number","after=../../health"] {
-        let response=client.get(format!("{base}/v1/corridors/page?{query}"))
-            .send().await.expect("malformed request");
-        assert_eq!(response.status(),reqwest::StatusCode::BAD_REQUEST, "{query}");
+    for query in [
+        "limit=0",
+        "limit=101",
+        "limit=not_a_number",
+        "after=../../health",
+    ] {
+        let response = client
+            .get(format!("{base}/v1/corridors/page?{query}"))
+            .send()
+            .await
+            .expect("malformed request");
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::BAD_REQUEST,
+            "{query}"
+        );
     }
-    let missing=client.get(format!("{base}/v1/corridors/{}",Uuid::new_v4()))
-        .send().await.expect("missing UUID");
-    assert_eq!(missing.status(),reqwest::StatusCode::NOT_FOUND);
+    let missing = client
+        .get(format!("{base}/v1/corridors/{}", Uuid::new_v4()))
+        .send()
+        .await
+        .expect("missing UUID");
+    assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
 
     server.abort();
     for id in fixtures {
-        sqlx::query("DELETE FROM corridors WHERE id=$1").bind(id)
-            .execute(&pool).await.expect("fixture cleanup");
+        sqlx::query("DELETE FROM corridors WHERE id=$1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .expect("fixture cleanup");
     }
 }

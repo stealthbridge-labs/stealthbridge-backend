@@ -12,7 +12,7 @@ SCHEMA_RE=re.compile(r"const REQUIRED_SCHEMA_VERSIONS: \[i64; (\d+)\] = \[([\s\S
 # The private draft vault is opt-in and is not part of the existing
 # production readiness contract until the protected migration is applied.
 # Do not block unrelated network and catalog reads on an unreleased vault.
-OPTIONAL_MIGRATIONS=(202611040001,202611120001,202611190001,202611200001)
+OPTIONAL_MIGRATIONS=(202611040001,202611120001,202611190001,202611200001,202611200002)
 ADDITIVE_ONLY=(202610130001,202610130002,202610150001,202610210001,202610270001,*OPTIONAL_MIGRATIONS)
 REQUIRED_TABLES=(
     "organization_invitations",
@@ -63,6 +63,11 @@ def validate_sources(files,server):
                          "PRIMARY KEY(account_address, id)", "UNIQUE(account_address, recipient_address, flow)",
                          "nonce UUID PRIMARY KEY"):
                 require(item in source, f"account beneficiaries migration missing bound: {item}")
+        if version == 202611200002:
+            for item in ("account_smart_accounts", "business_invoices", "business_webhooks",
+                         "business_api_credentials", "PRIMARY KEY(account_address, contract_address)",
+                         "PRIMARY KEY(organization_id, id)", "nonce UUID PRIMARY KEY"):
+                require(item in source, f"protocol/business operations migration missing bound: {item}")
         if version in ADDITIVE_ONLY:
             require("CREATE TABLE IF NOT EXISTS" in source,
                     f"additive migration {version} must create tables safely")

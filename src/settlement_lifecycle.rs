@@ -292,7 +292,9 @@ fn enabled() -> bool {
 }
 
 fn lower_hex64(s: &str) -> bool {
-    s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 fn safe_reason(s: &str) -> bool {
@@ -517,8 +519,8 @@ async fn create_lifecycle(
     req: &CreateSettlementRequest,
     stamp: i64,
 ) -> Result<(StatusCode, Value), StoreError> {
-    let decoded_recipient =
-        wallet::parse_canonical_stellar_address(&req.recipient_address).ok_or(StoreError::BadRequest)?;
+    let decoded_recipient = wallet::parse_canonical_stellar_address(&req.recipient_address)
+        .ok_or(StoreError::BadRequest)?;
     let recipient_kind = match decoded_recipient {
         wallet::StellarAddress::Classic(_) => "classic",
         wallet::StellarAddress::MuxedClassic { .. } => "muxed-classic",
@@ -639,22 +641,21 @@ async fn create_lifecycle(
             stamp,
         )
     });
-    let (final_state, quote_status, quote_sha256, quote_reason) =
-        if let Some(q) = verified_quote {
-            (
-                LifecycleState::Quoted,
-                "provider_verified",
-                Some(q.payload_sha256),
-                "provider_quote_verified",
-            )
-        } else {
-            (
-                LifecycleState::QuoteUnavailable,
-                "unavailable",
-                None,
-                "no_live_fx_or_liquidity_provider",
-            )
-        };
+    let (final_state, quote_status, quote_sha256, quote_reason) = if let Some(q) = verified_quote {
+        (
+            LifecycleState::Quoted,
+            "provider_verified",
+            Some(q.payload_sha256),
+            "provider_quote_verified",
+        )
+    } else {
+        (
+            LifecycleState::QuoteUnavailable,
+            "unavailable",
+            None,
+            "no_live_fx_or_liquidity_provider",
+        )
+    };
 
     let expires = stamp
         .checked_add(req.expires_in_seconds)
@@ -688,10 +689,30 @@ async fn create_lifecycle(
 
     // Record exact progressive journal & outbox stages 1 -> 2 -> 3 -> 4 atomically.
     for (rev, prev, next, reason) in [
-        (1, None, LifecycleState::InstructionCreated, "intent_registered"),
-        (2, Some(LifecycleState::InstructionCreated), LifecycleState::CorridorVerified, "corridor_snapshot_verified"),
-        (3, Some(LifecycleState::CorridorVerified), LifecycleState::AssetRecipientVerified, "asset_and_recipient_validated"),
-        (4, Some(LifecycleState::AssetRecipientVerified), final_state, quote_reason),
+        (
+            1,
+            None,
+            LifecycleState::InstructionCreated,
+            "intent_registered",
+        ),
+        (
+            2,
+            Some(LifecycleState::InstructionCreated),
+            LifecycleState::CorridorVerified,
+            "corridor_snapshot_verified",
+        ),
+        (
+            3,
+            Some(LifecycleState::CorridorVerified),
+            LifecycleState::AssetRecipientVerified,
+            "asset_and_recipient_validated",
+        ),
+        (
+            4,
+            Some(LifecycleState::AssetRecipientVerified),
+            final_state,
+            quote_reason,
+        ),
     ] {
         write_event_and_outbox(
             &mut tx,
@@ -901,12 +922,11 @@ async fn advance_lifecycle(
             {
                 return Err(StoreError::Conflict);
             }
-            let enabled_ok: bool =
-                sqlx::query_scalar("SELECT enabled FROM corridors WHERE id=$1")
-                    .bind(corridor_id)
-                    .fetch_optional(&mut *tx)
-                    .await?
-                    .unwrap_or(false);
+            let enabled_ok: bool = sqlx::query_scalar("SELECT enabled FROM corridors WHERE id=$1")
+                .bind(corridor_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .unwrap_or(false);
             if !enabled_ok {
                 return Err(StoreError::Conflict);
             }
@@ -978,9 +998,7 @@ async fn advance_lifecycle(
         LifecycleAction::SubmitTx {
             testnet_tx_hash, ..
         } => {
-            if !lower_hex64(testnet_tx_hash)
-                || !cur.can_transition(LifecycleState::TxSubmitted)
-            {
+            if !lower_hex64(testnet_tx_hash) || !cur.can_transition(LifecycleState::TxSubmitted) {
                 return Err(StoreError::Conflict);
             }
             next_state = LifecycleState::TxSubmitted;
@@ -1066,7 +1084,9 @@ async fn advance_lifecycle(
                 return Err(StoreError::Conflict);
             }
         }
-        LifecycleAction::OpenDispute { reason_code: rc, .. } => {
+        LifecycleAction::OpenDispute {
+            reason_code: rc, ..
+        } => {
             if !safe_reason(rc) || !cur.can_transition(LifecycleState::DisputeOpen) {
                 return Err(StoreError::BadRequest);
             }
@@ -1075,7 +1095,9 @@ async fn advance_lifecycle(
             reason_code = rc.clone();
             last_error_update = Some(rc.clone());
         }
-        LifecycleAction::RequestReversal { reason_code: rc, .. } => {
+        LifecycleAction::RequestReversal {
+            reason_code: rc, ..
+        } => {
             if !safe_reason(rc) || !cur.can_transition(LifecycleState::ReversalPending) {
                 return Err(StoreError::BadRequest);
             }
@@ -1084,7 +1106,9 @@ async fn advance_lifecycle(
             reconciliation_status = "disputed".to_owned();
             reason_code = rc.clone();
         }
-        LifecycleAction::ConfirmReversal { reason_code: rc, .. } => {
+        LifecycleAction::ConfirmReversal {
+            reason_code: rc, ..
+        } => {
             if !safe_reason(rc) || !cur.can_transition(LifecycleState::Reversed) {
                 return Err(StoreError::BadRequest);
             }
@@ -1180,7 +1204,8 @@ async fn directory(db: &PgPool, account: &str, stamp: i64) -> Result<Value, sqlx
         let state_raw: String = r.try_get("state")?;
         let expires: i64 = r.try_get("expires_at_unix")?;
         let effective_state = if stamp >= expires
-            && LifecycleState::parse(&state_raw).is_some_and(|s| s.can_transition(LifecycleState::Expired))
+            && LifecycleState::parse(&state_raw)
+                .is_some_and(|s| s.can_transition(LifecycleState::Expired))
         {
             "expired"
         } else {
@@ -1319,11 +1344,7 @@ pub async fn put(State(state): State<Arc<AppState>>, headers: HeaderMap, body: B
     handle(state, headers, body, "PUT").await
 }
 
-pub async fn post(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
+pub async fn post(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
     handle(state, headers, body, "POST").await
 }
 
