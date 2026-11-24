@@ -1899,7 +1899,13 @@ async fn diagnostic_responses(request: Request<Body>, next: Next) -> Response {
     let status = response.status();
     let (mut parts, body) = response.into_parts();
     let response = if status.is_client_error() || status.is_server_error() {
-        let details = if path == "/ready" && status == StatusCode::SERVICE_UNAVAILABLE {
+        // Bodies are preserved as `details` only where they carry nothing but
+        // fixed codes and public identifiers: readiness, and relayed
+        // smart-account deployments (whose on-chain tx hash must survive a
+        // failure to record it).
+        let details = if (path == "/ready" && status == StatusCode::SERVICE_UNAVAILABLE)
+            || path == "/v1/account/smart-accounts/deployments"
+        {
             to_bytes(body, 64 * 1024)
                 .await
                 .ok()
@@ -2193,6 +2199,12 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/protocol/contracts/live",
             get(crate::protocol_contracts::protocol_contracts_live),
+        )
+        .route(
+            "/v1/account/smart-accounts/deployments",
+            get(crate::smart_account_deploy::list)
+                .post(crate::smart_account_deploy::create)
+                .layer(axum::extract::DefaultBodyLimit::max(1024)),
         )
         .route(
             "/v1/account/smart-accounts",
