@@ -12,7 +12,7 @@ SCHEMA_RE=re.compile(r"const REQUIRED_SCHEMA_VERSIONS: \[i64; (\d+)\] = \[([\s\S
 # The private draft vault is opt-in and is not part of the existing
 # production readiness contract until the protected migration is applied.
 # Do not block unrelated network and catalog reads on an unreleased vault.
-OPTIONAL_MIGRATIONS=(202611040001,202611120001,202611190001,202611200001,202611200002)
+OPTIONAL_MIGRATIONS=(202611040001,202611120001,202611190001,202611200001,202611200002,202611240001)
 ADDITIVE_ONLY=(202610130001,202610130002,202610150001,202610210001,202610270001,*OPTIONAL_MIGRATIONS)
 REQUIRED_TABLES=(
     "organization_invitations",
@@ -68,9 +68,14 @@ def validate_sources(files,server):
                          "business_api_credentials", "PRIMARY KEY(account_address, contract_address)",
                          "PRIMARY KEY(organization_id, id)", "nonce UUID PRIMARY KEY"):
                 require(item in source, f"protocol/business operations migration missing bound: {item}")
+        if version == 202611240001:
+            for item in ("CREATE UNIQUE INDEX IF NOT EXISTS", "account_settlement_lifecycles(testnet_tx_hash)",
+                         "WHERE testnet_tx_hash IS NOT NULL"):
+                require(item in source, f"settlement tx-hash uniqueness migration missing bound: {item}")
         if version in ADDITIVE_ONLY:
-            require("CREATE TABLE IF NOT EXISTS" in source,
-                    f"additive migration {version} must create tables safely")
+            require("CREATE TABLE IF NOT EXISTS" in source
+                    or re.search(r"CREATE (UNIQUE )?INDEX IF NOT EXISTS", source) is not None,
+                    f"additive migration {version} must create tables or indexes safely")
             stripped=re.sub(r"--[^\n]*","",source)
             # An FK ON DELETE RESTRICT protects parent records; it is not
             # a DELETE DML statement and must not trip the destructive guard.
