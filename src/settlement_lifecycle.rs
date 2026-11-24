@@ -269,6 +269,9 @@ enum StoreError {
     Conflict,
     BadRequest,
     RpcUnavailable,
+    /// The referenced transaction exists but is not the payment this intent
+    /// promised (wrong payer, recipient, asset or amount). Audit C-5.
+    EvidenceMismatch,
 }
 
 impl From<sqlx::Error> for StoreError {
@@ -816,15 +819,22 @@ async fn advance_lifecycle(
     // For live RPC observation, query Stellar Testnet RPC BEFORE locking DB rows.
     let mut observed_tx_result: Option<transaction::TransactionObservation> = None;
     if let LifecycleAction::ObserveTx { .. } = action {
-        let tx_hash_opt: Option<String> = sqlx::query_scalar(
-            "SELECT testnet_tx_hash FROM account_settlement_lifecycles WHERE account_address=$1 AND id=$2",
+        let intent_row = sqlx::query(
+            "SELECT testnet_tx_hash,recipient_address,asset_code,asset_issuer,amount_minor_units FROM account_settlement_lifecycles WHERE account_address=$1 AND id=$2",
         )
         .bind(account)
         .bind(settlement_id)
         .fetch_optional(db)
         .await?
-        .flatten();
-        let tx_hash = tx_hash_opt.ok_or(StoreError::Conflict)?;
+        .ok_or(StoreError::Conflict)?;
+        let tx_hash: String = intent_row
+            .try_get::<Option<String>, _>("testnet_tx_hash")?
+            .ok_or(StoreError::Conflict)?;
+        let recipient: String = intent_row.try_get("recipient_address")?;
+        let asset_code: String = intent_row.try_get("asset_code")?;
+        let asset_issuer: Option<String> = intent_row.try_get("asset_issuer")?;
+        let amount: i64 = intent_row.try_get("amount_minor_units")?;
+        let payer = wallet::decode_account_address(account).ok_or(StoreError::BadRequest)?;
         let net = state
             .rpc("getNetwork")
             .await
@@ -839,6 +849,18 @@ async fn advance_lifecycle(
         let parsed = transaction::parse_result(&tx_hash, &rpc_res)
             .map_err(|_| StoreError::RpcUnavailable)?
             .ok_or(StoreError::Conflict)?;
+        // Inclusion alone is not evidence: the transaction must be exactly the
+        // payment this intent describes, signed by this account (audit C-5).
+        let expected = transaction::ExpectedPayment {
+            payer,
+            recipient: &recipient,
+            asset_code: &asset_code,
+            asset_issuer: asset_issuer.as_deref(),
+            amount,
+        };
+        if !transaction::envelope_pays(&rpc_res, &expected) {
+            return Err(StoreError::EvidenceMismatch);
+        }
         observed_tx_result = Some(parsed);
     }
 
@@ -976,15 +998,21 @@ async fn advance_lifecycle(
                 rpc_oldest_retained_ledger: 5_696_840,
                 durable_indexer_available: true,
                 recovery_seed_backed_up: true,
-                external_operator_or_issuer_verified: *privacy_rail_proof_verified,
+                // A client-supplied boolean attests nothing; until verifier
+                // receipts are observed on-chain this must stay false (C-4).
+                external_operator_or_issuer_verified: false,
                 sac_pool_frozen_or_shortfall: false,
             });
             customer_auth_update = Some(customer_auth_sha256.clone());
             // First emit customer_authorized atomically, then stage 7 result if eligible.
-            if *privacy_rail_proof_verified && rail_eval.architecturally_eligible {
-                next_state = LifecycleState::PrivacyProofVerified;
-                privacy_verified_update = Some(true);
-                reason_code = "privacy_rail_proof_attested".to_owned();
+            // Audit C-4: `privacy_rail_proof_verified` arrives from the client
+            // and can never mark a settlement private. Claiming it halts the
+            // flow at PrivacyProofPending instead of being trusted.
+            let _ = rail_eval.architecturally_eligible;
+            if *privacy_rail_proof_verified {
+                next_state = LifecycleState::PrivacyProofPending;
+                privacy_verified_update = Some(false);
+                reason_code = "privacy_proof_requires_onchain_receipt".to_owned();
             } else if *acknowledge_transparent_testnet_only {
                 next_state = LifecycleState::PrivacyProofVerified;
                 privacy_verified_update = Some(false);
@@ -999,6 +1027,19 @@ async fn advance_lifecycle(
             testnet_tx_hash, ..
         } => {
             if !lower_hex64(testnet_tx_hash) || !cur.can_transition(LifecycleState::TxSubmitted) {
+                return Err(StoreError::Conflict);
+            }
+            // One on-chain transaction can evidence at most one settlement
+            // (audit C-5; also enforced by a unique index).
+            let reused: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM account_settlement_lifecycles WHERE testnet_tx_hash=$1 AND NOT (account_address=$2 AND id=$3))",
+            )
+            .bind(testnet_tx_hash)
+            .bind(account)
+            .bind(settlement_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if reused {
                 return Err(StoreError::Conflict);
             }
             next_state = LifecycleState::TxSubmitted;
@@ -1324,6 +1365,7 @@ async fn handle(state: Arc<AppState>, headers: HeaderMap, body: Bytes, method: &
             Err(StoreError::BadRequest) => StatusCode::BAD_REQUEST.into_response(),
             Err(StoreError::Conflict) => StatusCode::CONFLICT.into_response(),
             Err(StoreError::RpcUnavailable) => StatusCode::BAD_GATEWAY.into_response(),
+            Err(StoreError::EvidenceMismatch) => StatusCode::UNPROCESSABLE_ENTITY.into_response(),
             Err(StoreError::Database) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
         }
     };

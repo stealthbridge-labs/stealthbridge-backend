@@ -274,7 +274,8 @@ async fn end_to_end_settlement_lifecycle_postgres_sdk_and_optional_live_testnet(
         "customer_auth_sha256": auth_digest,
         "ed25519_signature_hex": ed_sig,
         "acknowledge_transparent_testnet_only": false,
-        "privacy_rail_proof_verified": false
+        // Audit C-4: a client claim of proof verification must NOT be trusted.
+        "privacy_rail_proof_verified": true
     })
     .to_string();
     let r6: Value = signed(&client, &base, &owner, "POST", &auth_halt, Uuid::new_v4())
@@ -286,6 +287,14 @@ async fn end_to_end_settlement_lifecycle_postgres_sdk_and_optional_live_testnet(
         .unwrap();
     assert_eq!(r6["state"], "privacy_proof_pending");
     assert_eq!(r6["revision"], 6);
+    let claimed_private: bool = sqlx::query_scalar(
+        "SELECT privacy_rail_verified FROM account_settlement_lifecycles WHERE id=$1",
+    )
+    .bind(s1)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert!(!claimed_private, "client privacy claim must not be trusted");
 
     // Cancel path from privacy_proof_pending on s1 cleanly recorded
     let cancel_s1 = json!({ "action": "cancel", "id": s1, "expected_revision": 6 }).to_string();
@@ -387,7 +396,11 @@ async fn end_to_end_settlement_lifecycle_postgres_sdk_and_optional_live_testnet(
         .unwrap();
         assert_eq!(sub["state"], "tx_submitted");
 
-        let obs: Value = signed(
+        // Audit C-5: STEALTHBRIDGE_TESTNET_TX_HASH is any real, successful
+        // Testnet transaction that is NOT this intent's payment (e.g. a contract
+        // deployment). Inclusion alone used to finalize the settlement; it must
+        // now be refused with 422 and leave the state untouched.
+        let obs = signed(
             &client,
             &base,
             &owner,
@@ -397,48 +410,16 @@ async fn end_to_end_settlement_lifecycle_postgres_sdk_and_optional_live_testnet(
         )
         .send()
         .await
-        .unwrap()
-        .json()
-        .await
         .unwrap();
-        assert_eq!(obs["state"], "chain_finalized");
-        assert_eq!(obs["chain_status"], "SUCCESS");
-        assert_eq!(obs["payout_status"], "unavailable");
-        assert!(obs["observed_ledger"].as_i64().unwrap() > 0);
-
-        // Request payout fails closed without provider secret
-        assert_eq!(
-            signed(
-                &client,
-                &base,
-                &owner,
-                "POST",
-                &json!({"action":"request_payout","id":s2,"expected_revision":8}).to_string(),
-                Uuid::new_v4(),
-            )
-            .send()
-            .await
-            .unwrap()
-            .status(),
-            409
-        );
-
-        let rec: Value = signed(
-            &client,
-            &base,
-            &owner,
-            "POST",
-            &json!({"action":"reconcile","id":s2,"expected_revision":8}).to_string(),
-            Uuid::new_v4(),
+        assert_eq!(obs.status(), 422);
+        let still: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM account_settlement_lifecycles WHERE id=$1 AND state='tx_submitted' AND chain_status IS NULL",
         )
-        .send()
-        .await
-        .unwrap()
-        .json()
+        .bind(s2)
+        .fetch_one(&db)
         .await
         .unwrap();
-        assert_eq!(rec["state"], "reconciled");
-        assert_eq!(rec["payout_status"], "unavailable");
+        assert_eq!(still, 1);
     }
 
     // Read full GET directory and verify atomicity + outbox + built @stealthbridge/sdk parity!
