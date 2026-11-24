@@ -34,3 +34,5 @@ pub mod account_beneficiaries;
 pub mod account_operations;
 pub mod payment_instructions;
 pub mod protocol_contracts;
+pub mod relayer;
+pub mod smart_account_deploy;
