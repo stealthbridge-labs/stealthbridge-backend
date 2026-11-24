@@ -55,22 +55,39 @@ pub fn valid_https_webhook_url(raw: &str) -> bool {
     if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
         return false;
     }
-    let Some(host) = url.host_str() else {
+    // Audit H-4: the previous prefix denylist missed 172.16/12, 169.254/16
+    // (cloud metadata), 100.64/10 and decimal/hex/octal IPv4 spellings. The URL
+    // parser normalises all of those to `Host::Ipv4`, so any IP literal is
+    // refused outright: webhook endpoints must be DNS names. DNS names that
+    // resolve to private ranges must additionally be rejected at delivery
+    // time, after resolution (there is no delivery worker yet).
+    // `domain()` is None for every IPv4/IPv6 literal host.
+    let Some(host) = url.domain() else {
         return false;
     };
     let lower = host.to_ascii_lowercase();
+    const INTERNAL_SUFFIXES: [&str; 7] = [
+        ".localhost",
+        ".local",
+        ".internal",
+        ".intranet",
+        ".lan",
+        ".home.arpa",
+        ".corp",
+    ];
     if lower == "localhost"
-        || lower.ends_with(".localhost")
-        || lower.ends_with(".local")
-        || lower == "127.0.0.1"
-        || lower.starts_with("10.")
-        || lower.starts_with("192.168.")
-        || lower == "0.0.0.0"
-        || lower.contains(':')
+        || INTERNAL_SUFFIXES.iter().any(|s| lower.ends_with(s))
+        || url.port().is_some_and(|p| p != 443)
     {
         return false;
     }
-    lower.contains('.')
+    // Require a dotted name whose final label is alphabetic (a real TLD).
+    match lower.rsplit_once('.') {
+        Some((rest, tld)) => {
+            !rest.is_empty() && tld.len() >= 2 && tld.bytes().all(|b| b.is_ascii_lowercase())
+        }
+        None => false,
+    }
 }
 
 async fn resolve_org_role(
@@ -93,7 +110,10 @@ async fn resolve_org_role(
     };
     let role: String = row.try_get("role")?;
     let status: String = row.try_get("status")?;
-    if status == "suspended" {
+    // Audit H-5: only operator-activated organizations may issue credentials,
+    // webhooks or invoices. `pending` is self-registered and unverified, and
+    // team invites / business reviews already require `active`.
+    if status != "active" {
         return Ok(None);
     }
     Ok(Some((role, status)))
@@ -486,7 +506,9 @@ pub async fn upsert_invoice(
         || payload.due_at_unix <= 0
         || !matches!(
             payload.status.as_str(),
-            "draft" | "issued" | "settled_testnet" | "cancelled"
+            // Audit M-2: `settled_testnet` is evidence of an on-chain payment
+            // and may only be written by ledger reconciliation, never by a client.
+            "draft" | "issued" | "cancelled"
         )
         || !matches!(
             payload.privacy_mode.as_str(),
@@ -678,7 +700,8 @@ pub async fn upsert_webhook(
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)
          ON CONFLICT(organization_id, id) DO UPDATE
          SET endpoint_url = EXCLUDED.endpoint_url, subscribed_events = EXCLUDED.subscribed_events,
-             enabled = EXCLUDED.enabled, updated_at_unix = EXCLUDED.updated_at_unix",
+             enabled = EXCLUDED.enabled, updated_at_unix = EXCLUDED.updated_at_unix,
+             secret_prefix = EXCLUDED.secret_prefix, secret_sha256 = EXCLUDED.secret_sha256",
     )
     .bind(payload.organization_id)
     .bind(payload.id)
@@ -995,6 +1018,32 @@ mod tests {
         assert!(!valid_https_webhook_url("https://192.168.1.10/webhook"));
         assert!(!valid_https_webhook_url(
             "https://user:pass@hooks.example.com/hook"
+        ));
+    }
+
+    /// Audit H-4 bypasses of the old prefix denylist.
+    #[test]
+    fn webhook_url_rejects_every_ip_literal_and_internal_name() {
+        for raw in [
+            "https://172.16.0.5/hook",
+            "https://169.254.169.254/latest/meta-data",
+            "https://100.64.0.1/hook",
+            "https://2130706433/hook",
+            "https://0x7f000001/hook",
+            "https://0177.0.0.1/hook",
+            "https://8.8.8.8/hook",
+            "https://[::1]/hook",
+            "https://[fd00::1]/hook",
+            "https://metadata.google.internal/hook",
+            "https://router.lan/hook",
+            "https://printer.home.arpa/hook",
+            "https://hooks.example.com:8443/hook",
+            "https://nodot/hook",
+        ] {
+            assert!(!valid_https_webhook_url(raw), "{raw} must be rejected");
+        }
+        assert!(valid_https_webhook_url(
+            "https://hooks.example.com:443/hook"
         ));
     }
 }
