@@ -456,6 +456,265 @@ pub fn envelope_executes(
     })
 }
 
+/// The SAC `transfer` event emitted by the executed payment must show exactly
+/// the authorized movement: topics `["transfer", from, to, ..]`, data = amount
+/// (an i128, or a map with an `amount` entry when muxed ids are present).
+pub fn transfer_event_matches(
+    rpc_result: &Value,
+    token: [u8; 32],
+    from: &ScVal,
+    to: &ScVal,
+    amount: i64,
+) -> bool {
+    use stellar_xdr::{ContractEvent, ContractEventBody};
+    let Some(per_op) = rpc_result["events"]["contractEventsXdr"].as_array() else {
+        return false;
+    };
+    let want_amount = i128_scval(amount);
+    per_op
+        .iter()
+        .filter_map(Value::as_array)
+        .flatten()
+        .any(|e| {
+            let Some(ev) = e
+                .as_str()
+                .and_then(|b| decode_xdr::<ContractEvent>(b, 16 * 1024))
+            else {
+                return false;
+            };
+            if ev.contract_id.as_ref().map(|c| c.0 .0) != Some(token) {
+                return false;
+            }
+            let ContractEventBody::V0(body) = &ev.body;
+            let t = &body.topics;
+            let is_transfer =
+                matches!(t.first(), Some(ScVal::Symbol(s)) if s.0.as_slice() == b"transfer");
+            let amount_ok = match &body.data {
+                v @ ScVal::I128(_) => *v == want_amount,
+                ScVal::Map(Some(m)) => m.iter().any(|kv| {
+                    matches!(&kv.key, ScVal::Symbol(s) if s.0.as_slice() == b"amount")
+                        && kv.val == want_amount
+                }),
+                _ => false,
+            };
+            is_transfer && t.len() >= 3 && &t[1] == from && &t[2] == to && amount_ok
+        })
+}
+
+/// Exact receipt check for a confirmed payment: the executed envelope carries
+/// precisely the authorized invocation with this account's credentials AND
+/// this intent's nonce, and the asset contract emitted the matching transfer.
+pub fn receipt_matches(
+    rpc_result: &Value,
+    account: [u8; 32],
+    call: &InvokeContractArgs,
+    nonce: i64,
+) -> bool {
+    let Some(TransactionEnvelope::Tx(v1)) = rpc_result["envelopeXdr"]
+        .as_str()
+        .and_then(|b| decode_xdr::<TransactionEnvelope>(b, 256 * 1024))
+    else {
+        return false;
+    };
+    let envelope_ok = v1.tx.operations.iter().any(|op| {
+        let OperationBody::InvokeHostFunction(f) = &op.body else {
+            return false;
+        };
+        let HostFunction::InvokeContract(c) = &f.host_function else {
+            return false;
+        };
+        c == call
+            && f.auth.iter().any(|e| {
+                matches!(&e.credentials, SorobanCredentials::Address(cr)
+                    if cr.address == contract_address(account) && cr.nonce == nonce)
+            })
+    });
+    let ScAddress::Contract(ContractId(Hash(token))) = call.contract_address else {
+        return false;
+    };
+    let (Some(from), Some(to)) = (call.args.first(), call.args.get(1)) else {
+        return false;
+    };
+    let amount = match call.args.get(2) {
+        Some(ScVal::I128(p)) if p.hi == 0 => p.lo as i64,
+        _ => return false,
+    };
+    envelope_ok && transfer_event_matches(rpc_result, token, from, to, amount)
+}
+
+/// Fee actually charged, from the transaction result.
+pub fn fee_charged(rpc_result: &Value) -> Option<i64> {
+    let r: stellar_xdr::TransactionResult =
+        decode_xdr(rpc_result["resultXdr"].as_str()?, 16 * 1024)?;
+    Some(r.fee_charged)
+}
+
+// ------------------------------------------------------------- reconciliation
+
+pub struct PendingPayment {
+    pub id: Uuid,
+    pub contract: String,
+    pub destination: String,
+    pub asset_contract: String,
+    pub amount: i64,
+    pub nonce: i64,
+    pub status: String,
+    pub tx_hash: Option<String>,
+    pub expiration_ledger: i64,
+    pub updated_at_unix: i64,
+}
+
+/// Next state for an unfinished payment, derived only from chain evidence and
+/// time. `None` = nothing to change yet.
+pub fn next_state(
+    p: &PendingPayment,
+    latest_ledger: Option<u32>,
+    observed: Option<&Value>,
+    now_unix: i64,
+) -> Option<(&'static str, Option<i64>, Option<&'static str>)> {
+    match p.status.as_str() {
+        "prepared" => latest_ledger
+            .filter(|l| i64::from(*l) >= p.expiration_ledger)
+            .map(|_| ("expired", None, Some("AUTHORIZATION_EXPIRED"))),
+        // The hash is persisted BEFORE broadcast, so a row stuck in
+        // `submitting` without a hash was never sent: safe to reopen.
+        "submitting" if p.tx_hash.is_none() && now_unix - p.updated_at_unix > 120 => {
+            match latest_ledger {
+                Some(l) if i64::from(l) < p.expiration_ledger => Some(("prepared", None, None)),
+                Some(_) => Some(("expired", None, Some("AUTHORIZATION_EXPIRED"))),
+                None => None,
+            }
+        }
+        "submitted" => {
+            let res = observed?;
+            match res["status"].as_str() {
+                Some("SUCCESS") => {
+                    let expected = relayer::contract_hash(&p.asset_contract)
+                        .zip(relayer::contract_hash(&p.contract))
+                        .and_then(|(t, a)| {
+                            transfer_args(t, &p.contract, &p.destination, p.amount).map(|c| (a, c))
+                        });
+                    match expected {
+                        Some((acct, call)) if receipt_matches(res, acct, &call, p.nonce) => {
+                            Some(("confirmed", res["ledger"].as_i64(), None))
+                        }
+                        _ => Some(("failed", res["ledger"].as_i64(), Some("EVIDENCE_MISMATCH"))),
+                    }
+                }
+                Some("FAILED") => Some(("failed", res["ledger"].as_i64(), Some("FAILED_ON_CHAIN"))),
+                // After the time bounds have passed the network can never
+                // include the transaction, so "not found" is final.
+                Some("NOT_FOUND")
+                    if now_unix > p.updated_at_unix + relayer::TX_VALIDITY_SECS + 60 =>
+                {
+                    Some(("failed", None, Some("NOT_INCLUDED")))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+const PENDING_COLUMNS: &str = "id,contract_address,destination,asset_contract,amount_stroops,auth_nonce,status,tx_hash,expiration_ledger,updated_at_unix";
+
+fn pending_from_row(r: &sqlx::postgres::PgRow) -> PendingPayment {
+    PendingPayment {
+        id: r.get("id"),
+        contract: r.get("contract_address"),
+        destination: r.get("destination"),
+        asset_contract: r.get("asset_contract"),
+        amount: r.get("amount_stroops"),
+        nonce: r.get("auth_nonce"),
+        status: r.get("status"),
+        tx_hash: r.get("tx_hash"),
+        expiration_ledger: r.get("expiration_ledger"),
+        updated_at_unix: r.get("updated_at_unix"),
+    }
+}
+
+/// Advances unfinished payments. Writes are guarded by the current status so
+/// concurrent reconcilers (customer reads, the scheduled job) cannot fight.
+pub async fn reconcile(state: &AppState, db: &sqlx::PgPool, rows: Vec<PendingPayment>) -> usize {
+    let latest = latest_ledger(state).await.ok();
+    let mut changed = 0;
+    for p in rows {
+        let observed = match (&p.status[..], &p.tx_hash) {
+            ("submitted", Some(h)) => state
+                .rpc_with_params("getTransaction", Some(json!({"hash": h})))
+                .await
+                .ok(),
+            _ => None,
+        };
+        let Some((next, ledger, code)) = next_state(&p, latest, observed.as_ref(), now()) else {
+            continue;
+        };
+        let updated = sqlx::query(
+            "UPDATE account_smart_account_payments SET status=$2, ledger=COALESCE($3, ledger), error_code=$4, updated_at_unix=$5
+             WHERE id=$1 AND status=$6",
+        )
+        .bind(p.id)
+        .bind(next)
+        .bind(ledger)
+        .bind(code)
+        .bind(now())
+        .bind(&p.status)
+        .execute(db)
+        .await;
+        if matches!(updated, Ok(r) if r.rows_affected() == 1) {
+            changed += 1;
+        }
+    }
+    changed
+}
+
+/// `GET /internal/payments/reconcile` for a scheduler. Bearer token from
+/// STEALTHBRIDGE_RECONCILE_TOKEN or Vercel's CRON_SECRET; disabled if neither
+/// is set. Processes at most 50 unfinished payments per call.
+pub async fn reconcile_job(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    use hmac::Mac;
+    let expected = std::env::var("STEALTHBRIDGE_RECONCILE_TOKEN")
+        .or_else(|_| std::env::var("CRON_SECRET"))
+        .ok()
+        .filter(|t| t.len() >= 32);
+    let Some(expected) = expected else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let supplied = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+    // Constant-time comparison via HMAC verify.
+    let mut mac = hmac::Hmac::<Sha256>::new_from_slice(b"reconcile-token-compare").unwrap();
+    mac.update(expected.as_bytes());
+    let tag = mac.finalize().into_bytes();
+    let mut check = hmac::Hmac::<Sha256>::new_from_slice(b"reconcile-token-compare").unwrap();
+    check.update(supplied.as_bytes());
+    if check.verify_slice(&tag).is_err() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(db) = state.db.as_ref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let rows = match sqlx::query(&format!(
+        "SELECT {PENDING_COLUMNS} FROM account_smart_account_payments
+         WHERE status IN ('prepared','submitting','submitted') ORDER BY updated_at_unix ASC LIMIT 50"
+    ))
+    .fetch_all(db)
+    .await
+    {
+        Ok(r) => r.iter().map(pending_from_row).collect::<Vec<_>>(),
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    let scanned = rows.len();
+    let changed = reconcile(&state, db, rows).await;
+    reply(
+        json!({"scanned": scanned, "changed": changed}),
+        StatusCode::OK,
+    )
+}
+
 // ------------------------------------------------------------------- service
 
 struct Config {
@@ -630,7 +889,8 @@ async fn prepare(
     };
     let fee: i64 = sim["minResourceFee"]
         .as_str()
-        .and_then(|s| s.parse().ok())
+        .and_then(|s| s.parse::<u32>().ok())
+        .map(|r| i64::from(relayer::estimated_total_fee(r)))
         .unwrap_or(0);
     let id = Uuid::new_v4();
     let entry_b64 = relayer::b64(&entry.to_xdr(Limits::none()).unwrap());
@@ -805,10 +1065,24 @@ async fn submit(
         c.signature = sig_val;
     }
     let relayer_pub = cfg.key.verifying_key().to_bytes();
+    let reopen = || async {
+        let _ = sqlx::query("UPDATE account_smart_account_payments SET status='prepared' WHERE id=$1 AND status='submitting'")
+            .bind(id)
+            .execute(db)
+            .await;
+    };
+    // Everything that consumes the relayer's sequence number runs under one
+    // cross-instance lock, so concurrent payments cannot collide.
+    let Some(lock) = relayer::lock_relayer(db).await else {
+        reopen().await;
+        return fail("RELAYER_BUSY", StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let max_time = (now() + relayer::TX_VALIDITY_SECS) as u64;
     let built = async {
         let seq = relayer::relayer_sequence(state, relayer_pub).await?;
         let tx =
             invoke_tx(relayer_pub, seq + 1, call, vec![entry]).ok_or(RelayError::InvalidInput)?;
+        let tx = relayer::with_time_bounds(tx, max_time);
         // Enforcing simulation: the account's __check_auth decides here.
         let sim = simulate(state, &tx).await?;
         if sim.get("error").is_some_and(|e| !e.is_null()) {
@@ -820,43 +1094,57 @@ async fn submit(
     let ready = match built {
         Ok(t) => t,
         Err(RelayError::Simulation) => {
+            lock.release().await;
             mark("failed", "REJECTED_BY_ACCOUNT").await;
             return fail("REJECTED_BY_ACCOUNT", StatusCode::UNPROCESSABLE_ENTITY);
         }
         Err(_) => {
-            let _ = sqlx::query("UPDATE account_smart_account_payments SET status='prepared' WHERE id=$1 AND status='submitting'")
-                .bind(id)
-                .execute(db)
-                .await;
+            lock.release().await;
+            reopen().await;
             return fail("NETWORK_UNAVAILABLE", StatusCode::BAD_GATEWAY);
         }
     };
     let hash = relayer::transaction_hash(&ready, &passphrase);
     let envelope = relayer::sign(ready, &passphrase, &cfg.key);
-    let sent = state
-        .rpc_with_params(
-            "sendTransaction",
-            Some(json!({"transaction": relayer::b64(&envelope.to_xdr(Limits::none()).unwrap())})),
-        )
-        .await;
-    let accepted =
-        matches!(&sent, Ok(v) if matches!(v["status"].as_str(), Some("PENDING" | "DUPLICATE")));
-    if !accepted {
-        mark("failed", "SUBMISSION_REJECTED").await;
-        return fail("SUBMISSION_REJECTED", StatusCode::BAD_GATEWAY);
-    }
-    let _ = sqlx::query(
-        "UPDATE account_smart_account_payments SET status='submitted', tx_hash=$2, updated_at_unix=$3 WHERE id=$1",
+    // Write-ahead: persist the hash BEFORE broadcasting. If anything fails
+    // after this point, reconciliation can still find the transaction.
+    let persisted = sqlx::query(
+        "UPDATE account_smart_account_payments SET status='submitted', tx_hash=$2, updated_at_unix=$3 WHERE id=$1 AND status='submitting'",
     )
     .bind(id)
     .bind(&hash)
     .bind(now())
     .execute(db)
     .await;
-    reply(
-        json!({"id": id, "status": "submitted", "tx_hash": hash}),
-        StatusCode::ACCEPTED,
-    )
+    if !matches!(persisted, Ok(r) if r.rows_affected() == 1) {
+        lock.release().await;
+        reopen().await;
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    let outcome = relayer::send_envelope(state, &envelope).await;
+    lock.release().await;
+    match outcome {
+        relayer::SendOutcome::Accepted => reply(
+            json!({"id": id, "status": "submitted", "tx_hash": hash}),
+            StatusCode::ACCEPTED,
+        ),
+        relayer::SendOutcome::Rejected => {
+            let _ = sqlx::query(
+                "UPDATE account_smart_account_payments SET status='failed', error_code='SUBMISSION_REJECTED', updated_at_unix=$2 WHERE id=$1 AND status='submitted'",
+            )
+            .bind(id)
+            .bind(now())
+            .execute(db)
+            .await;
+            fail("SUBMISSION_REJECTED", StatusCode::BAD_GATEWAY)
+        }
+        // Unknown: it may still land. Report it as submitted; the ledger
+        // decides (confirmed, failed, or NOT_INCLUDED after time bounds).
+        relayer::SendOutcome::Ambiguous => reply(
+            json!({"id": id, "status": "submitted", "tx_hash": hash, "confirmation": "pending"}),
+            StatusCode::ACCEPTED,
+        ),
+    }
 }
 
 async fn refresh_and_list(
@@ -864,81 +1152,40 @@ async fn refresh_and_list(
     db: &sqlx::PgPool,
     account: &str,
 ) -> Result<Vec<Value>, sqlx::Error> {
+    let pending = sqlx::query(&format!(
+        "SELECT {PENDING_COLUMNS} FROM account_smart_account_payments
+         WHERE account_address=$1 AND status IN ('prepared','submitting','submitted') LIMIT 25"
+    ))
+    .bind(account)
+    .fetch_all(db)
+    .await?;
+    reconcile(state, db, pending.iter().map(pending_from_row).collect()).await;
     let rows = sqlx::query(
-        "SELECT id,contract_address,destination,asset,asset_contract,amount_stroops,status,tx_hash,ledger,expiration_ledger,fee_estimate_stroops,error_code,created_at_unix
+        "SELECT id,contract_address,destination,asset,asset_contract,amount_stroops,status,tx_hash,ledger,fee_estimate_stroops,error_code,created_at_unix
          FROM account_smart_account_payments WHERE account_address=$1 ORDER BY created_at_unix DESC LIMIT 25",
     )
     .bind(account)
     .fetch_all(db)
     .await?;
-    let latest = latest_ledger(state).await.ok();
-    let mut out = Vec::with_capacity(rows.len());
-    for r in rows {
-        let id: Uuid = r.get("id");
-        let mut status: String = r.get("status");
-        let mut ledger: Option<i64> = r.get("ledger");
-        let mut error: Option<String> = r.get("error_code");
-        let contract: String = r.get("contract_address");
-        let destination: String = r.get("destination");
-        let asset_contract: String = r.get("asset_contract");
-        let amount: i64 = r.get("amount_stroops");
-        let tx_hash: Option<String> = r.get("tx_hash");
-        let expiration: i64 = r.get("expiration_ledger");
-        if status == "prepared" && latest.is_some_and(|l| i64::from(l) >= expiration) {
-            status = "expired".into();
-            sqlx::query("UPDATE account_smart_account_payments SET status='expired' WHERE id=$1 AND status='prepared'")
-                .bind(id).execute(db).await?;
-        }
-        if status == "submitted" {
-            if let Some(hash) = &tx_hash {
-                let observed = state
-                    .rpc_with_params("getTransaction", Some(json!({"hash": hash})))
-                    .await
-                    .ok();
-                if let Some(res) = observed {
-                    let expected = relayer::contract_hash(&asset_contract)
-                        .zip(relayer::contract_hash(&contract))
-                        .and_then(|(t, a)| {
-                            transfer_args(t, &contract, &destination, amount).map(|c| (a, c))
-                        });
-                    let next = match (res["status"].as_str(), expected) {
-                        (Some("SUCCESS"), Some((acct, call)))
-                            if envelope_executes(&res, acct, &call) =>
-                        {
-                            Some(("confirmed", res["ledger"].as_i64(), None))
-                        }
-                        (Some("SUCCESS"), _) => Some(("failed", None, Some("EVIDENCE_MISMATCH"))),
-                        (Some("FAILED"), _) => {
-                            Some(("failed", res["ledger"].as_i64(), Some("FAILED_ON_CHAIN")))
-                        }
-                        _ => None,
-                    };
-                    if let Some((s, l, e)) = next {
-                        sqlx::query("UPDATE account_smart_account_payments SET status=$2, ledger=$3, error_code=$4, updated_at_unix=$5 WHERE id=$1 AND status='submitted'")
-                            .bind(id).bind(s).bind(l).bind(e).bind(now()).execute(db).await?;
-                        status = s.into();
-                        ledger = l;
-                        error = e.map(Into::into);
-                    }
-                }
-            }
-        }
-        out.push(json!({
-            "id": id,
-            "contract_address": contract,
-            "destination": destination,
-            "asset": r.get::<String,_>("asset"),
-            "asset_contract": asset_contract,
-            "amount_stroops": amount,
-            "status": status,
-            "tx_hash": tx_hash,
-            "ledger": ledger,
-            "fee_estimate_stroops": r.get::<i64,_>("fee_estimate_stroops"),
-            "error_code": error,
-            "created_at_unix": r.get::<i64,_>("created_at_unix"),
-        }));
-    }
-    Ok(out)
+    Ok(rows
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r.get::<Uuid,_>("id"),
+                "contract_address": r.get::<String,_>("contract_address"),
+                "destination": r.get::<String,_>("destination"),
+                "asset": r.get::<String,_>("asset"),
+                "asset_contract": r.get::<String,_>("asset_contract"),
+                "amount_stroops": r.get::<i64,_>("amount_stroops"),
+                "status": r.get::<String,_>("status"),
+                "tx_hash": r.get::<Option<String>,_>("tx_hash"),
+                "ledger": r.get::<Option<i64>,_>("ledger"),
+                "fee_estimate_stroops": r.get::<i64,_>("fee_estimate_stroops"),
+                "error_code": r.get::<Option<String>,_>("error_code"),
+                "created_at_unix": r.get::<i64,_>("created_at_unix"),
+            })
+        })
+        .collect())
 }
 
 pub async fn get(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {

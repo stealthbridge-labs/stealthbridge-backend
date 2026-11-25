@@ -83,6 +83,12 @@ async fn deployment_api_is_authenticated_configured_and_never_records_unsubmitte
     std::env::remove_var("STEALTHBRIDGE_RELAYER_SECRET");
     let (base, db, task) = start().await;
     let client = reqwest::Client::new();
+    // Payments reference deployments (FK): clear them first.
+    sqlx::query("DELETE FROM account_smart_account_payments WHERE account_address=$1")
+        .bind(OWNER)
+        .execute(&db)
+        .await
+        .unwrap();
     sqlx::query("DELETE FROM account_smart_account_deployments WHERE account_address=$1")
         .bind(OWNER)
         .execute(&db)

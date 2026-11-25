@@ -2213,6 +2213,10 @@ pub fn router(state: AppState) -> Router {
                 .layer(axum::extract::DefaultBodyLimit::max(8192)),
         )
         .route(
+            "/internal/payments/reconcile",
+            get(crate::smart_account_payments::reconcile_job),
+        )
+        .route(
             "/v1/account/smart-accounts/balances",
             get(crate::smart_account_payments::balances),
         )

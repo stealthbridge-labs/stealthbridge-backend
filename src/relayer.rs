@@ -170,6 +170,17 @@ fn simulated_resources(sim: &Value) -> Result<(SorobanTransactionData, u32), Rel
     Ok((data, resource_fee))
 }
 
+/// What the relayer will pay for a transaction whose recording simulation
+/// reported `resource_fee`: base fee + 15% headroom + an allowance for the
+/// passkey signature verification that only runs in the enforcing simulation
+/// (calibrated on a local network, see PROGRESS.md).
+pub const WEBAUTHN_VERIFY_ALLOWANCE: u32 = 60_000;
+pub fn estimated_total_fee(resource_fee: u32) -> u32 {
+    BASE_FEE
+        .saturating_add(resource_fee.saturating_add(resource_fee / 100 * 15))
+        .saturating_add(WEBAUTHN_VERIFY_ALLOWANCE)
+}
+
 fn apply_resources(
     mut tx: Transaction,
     data: SorobanTransactionData,
@@ -528,5 +539,147 @@ mod tests {
             stellar_strkey::Unredacted(&stellar_strkey::ed25519::PrivateKey([8; 32])).to_string();
         assert!(relayer_key(seed.as_str()).is_some());
         assert!(relayer_key("SNOTAKEY").is_none());
+    }
+}
+
+/// Serializes everything that consumes the relayer's sequence number
+/// (read sequence -> build -> sign -> persist -> send) across all backend
+/// instances. A transaction-scoped Postgres advisory lock: it is released on
+/// commit, on rollback, and if the holder crashes or the connection drops,
+/// so a failed request can never leave the relayer wedged.
+pub struct RelayerLock {
+    tx: sqlx::Transaction<'static, sqlx::Postgres>,
+}
+
+const RELAYER_LOCK_KEY: i64 = 0x5354_4252_5245_4c59; // "STBRRELY"
+
+pub async fn lock_relayer(db: &sqlx::PgPool) -> Option<RelayerLock> {
+    // Each attempt uses a short-lived transaction and gives its connection
+    // back while waiting. The pool is small (serverless), and the lock holder
+    // needs a second connection for its write-ahead update: a waiter must
+    // never sit on a connection, or the two would deadlock.
+    for _ in 0..60 {
+        let mut tx = db.begin().await.ok()?;
+        let got: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+            .bind(RELAYER_LOCK_KEY)
+            .fetch_one(&mut *tx)
+            .await
+            .ok()?;
+        if got {
+            return Some(RelayerLock { tx });
+        }
+        drop(tx); // rollback: returns the connection to the pool
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    None
+}
+
+impl RelayerLock {
+    pub async fn release(self) {
+        let _ = self.tx.commit().await;
+    }
+}
+
+/// Seconds a relayed transaction stays valid. After `max_time` passes, the
+/// network can never include it, so "not found" becomes a definitive outcome.
+pub const TX_VALIDITY_SECS: i64 = 120;
+
+pub fn with_time_bounds(mut tx: Transaction, max_time_unix: u64) -> Transaction {
+    tx.cond = stellar_xdr::Preconditions::Time(stellar_xdr::TimeBounds {
+        min_time: stellar_xdr::TimePoint(0),
+        max_time: stellar_xdr::TimePoint(max_time_unix),
+    });
+    tx
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum SendOutcome {
+    /// Queued by the network (or already known).
+    Accepted,
+    /// Definitively refused; the transaction will never be included.
+    Rejected,
+    /// Unknown (transport error, timeout, malformed reply). Only the ledger
+    /// can tell; reconcile by hash until the time bounds expire.
+    Ambiguous,
+}
+
+pub fn classify_send(reply: &Result<Value, ()>) -> SendOutcome {
+    match reply {
+        Ok(v) => match v["status"].as_str() {
+            Some("PENDING") | Some("DUPLICATE") => SendOutcome::Accepted,
+            Some("ERROR") => SendOutcome::Rejected,
+            // TRY_AGAIN_LATER: not queued. Callers retry once; if it persists
+            // the transaction was not accepted.
+            Some("TRY_AGAIN_LATER") => SendOutcome::Rejected,
+            _ => SendOutcome::Ambiguous,
+        },
+        Err(()) => SendOutcome::Ambiguous,
+    }
+}
+
+/// Sends a signed envelope; retries once on TRY_AGAIN_LATER.
+pub async fn send_envelope(state: &AppState, envelope: &TransactionEnvelope) -> SendOutcome {
+    let body = json!({"transaction": b64(&envelope.to_xdr(Limits::none()).unwrap())});
+    for attempt in 0..2 {
+        let reply = state
+            .rpc_with_params("sendTransaction", Some(body.clone()))
+            .await;
+        let busy = matches!(&reply, Ok(v) if v["status"].as_str() == Some("TRY_AGAIN_LATER"));
+        if busy && attempt == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            continue;
+        }
+        return classify_send(&reply);
+    }
+    SendOutcome::Rejected
+}
+
+#[cfg(test)]
+mod send_tests {
+    use super::*;
+
+    #[test]
+    fn classifies_send_replies_conservatively() {
+        assert_eq!(
+            classify_send(&Ok(json!({"status":"PENDING"}))),
+            SendOutcome::Accepted
+        );
+        assert_eq!(
+            classify_send(&Ok(json!({"status":"DUPLICATE"}))),
+            SendOutcome::Accepted
+        );
+        assert_eq!(
+            classify_send(&Ok(json!({"status":"ERROR"}))),
+            SendOutcome::Rejected
+        );
+        // Anything we cannot interpret must not be treated as a failure:
+        // the transaction may still be included.
+        assert_eq!(classify_send(&Err(())), SendOutcome::Ambiguous);
+        assert_eq!(
+            classify_send(&Ok(json!({"status":"WHAT"}))),
+            SendOutcome::Ambiguous
+        );
+        assert_eq!(classify_send(&Ok(json!({}))), SendOutcome::Ambiguous);
+    }
+
+    #[test]
+    fn time_bounds_change_the_transaction_hash() {
+        let tx = create_account_tx(
+            [1; 32],
+            2,
+            "CAUJ5FMGDISNYEU7T6EQDYRLFF7CVC5F2PXJVEHQHY7HM275I2X6ITH6",
+            &SignerKey::Ed25519([3; 32]),
+            [4; 32],
+            None,
+        )
+        .unwrap();
+        let bounded = with_time_bounds(tx.clone(), 1_000);
+        assert!(
+            matches!(bounded.cond, stellar_xdr::Preconditions::Time(ref t) if t.max_time.0 == 1_000)
+        );
+        assert_ne!(
+            transaction_hash(&tx, TESTNET_PASSPHRASE),
+            transaction_hash(&bounded, TESTNET_PASSPHRASE)
+        );
     }
 }
