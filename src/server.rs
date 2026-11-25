@@ -236,7 +236,11 @@ impl AppState {
         let rpc_url = env::var("STELLAR_RPC_URL")
             .unwrap_or_else(|_| "https://soroban-testnet.stellar.org".to_owned());
         let url = reqwest::Url::parse(&rpc_url)?;
-        if url.scheme() != "https"
+        // Plain HTTP only for an explicitly enabled local quickstart network.
+        let local_http = url.scheme() == "http"
+            && matches!(url.host_str(), Some("localhost" | "127.0.0.1"))
+            && crate::relayer::local_network_allowed();
+        if (url.scheme() != "https" && !local_http)
             || !url.username().is_empty()
             || url.password().is_some()
             || url.query().is_some()
@@ -1905,6 +1909,8 @@ async fn diagnostic_responses(request: Request<Body>, next: Next) -> Response {
         // failure to record it).
         let details = if (path == "/ready" && status == StatusCode::SERVICE_UNAVAILABLE)
             || path == "/v1/account/smart-accounts/deployments"
+            || path == "/v1/account/smart-accounts/payments"
+            || path == "/v1/account/smart-accounts/balances"
         {
             to_bytes(body, 64 * 1024)
                 .await
@@ -2199,6 +2205,16 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/protocol/contracts/live",
             get(crate::protocol_contracts::protocol_contracts_live),
+        )
+        .route(
+            "/v1/account/smart-accounts/payments",
+            get(crate::smart_account_payments::get)
+                .post(crate::smart_account_payments::post)
+                .layer(axum::extract::DefaultBodyLimit::max(8192)),
+        )
+        .route(
+            "/v1/account/smart-accounts/balances",
+            get(crate::smart_account_payments::balances),
         )
         .route(
             "/v1/account/smart-accounts/deployments",

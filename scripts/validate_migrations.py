@@ -12,7 +12,7 @@ SCHEMA_RE=re.compile(r"const REQUIRED_SCHEMA_VERSIONS: \[i64; (\d+)\] = \[([\s\S
 # The private draft vault is opt-in and is not part of the existing
 # production readiness contract until the protected migration is applied.
 # Do not block unrelated network and catalog reads on an unreleased vault.
-OPTIONAL_MIGRATIONS=(202611040001,202611120001,202611190001,202611200001,202611200002,202611240001,202611240002)
+OPTIONAL_MIGRATIONS=(202611040001,202611120001,202611190001,202611200001,202611200002,202611240001,202611240002,202611250001)
 ADDITIVE_ONLY=(202610130001,202610130002,202610150001,202610210001,202610270001,*OPTIONAL_MIGRATIONS)
 REQUIRED_TABLES=(
     "organization_invitations",
@@ -77,6 +77,11 @@ def validate_sources(files,server):
                          "tx_hash CHAR(64) NOT NULL UNIQUE", "status IN('submitted','deployed','failed')",
                          "network = 'testnet'", "nonce UUID PRIMARY KEY"):
                 require(item in source, f"smart-account deployment migration missing bound: {item}")
+        if version == 202611250001:
+            for item in ("account_smart_account_payments", "account_smart_account_payment_receipts",
+                         "tx_hash CHAR(64) UNIQUE", "UNIQUE(contract_address, auth_nonce)",
+                         "REFERENCES account_smart_account_deployments", "nonce UUID PRIMARY KEY"):
+                require(item in source, f"smart-account payments migration missing bound: {item}")
         if version in ADDITIVE_ONLY:
             require("CREATE TABLE IF NOT EXISTS" in source
                     or re.search(r"CREATE (UNIQUE )?INDEX IF NOT EXISTS", source) is not None,

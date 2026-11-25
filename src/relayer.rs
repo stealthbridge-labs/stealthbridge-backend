@@ -24,6 +24,30 @@ use stellar_xdr::{
 };
 
 pub const TESTNET_PASSPHRASE: &str = "Test SDF Network ; September 2015";
+/// Local quickstart network; accepted only with STEALTHBRIDGE_ALLOW_LOCAL_NETWORK=true.
+pub const STANDALONE_PASSPHRASE: &str = "Standalone Network ; February 2017";
+
+pub fn local_network_allowed() -> bool {
+    std::env::var("STEALTHBRIDGE_ALLOW_LOCAL_NETWORK").as_deref() == Ok("true")
+}
+
+/// The relayer only ever signs for Testnet, or a local network when explicitly
+/// enabled. The public network is never accepted.
+pub fn allowed_network(passphrase: &str) -> bool {
+    passphrase == TESTNET_PASSPHRASE
+        || (passphrase == STANDALONE_PASSPHRASE && local_network_allowed())
+}
+
+/// Passphrase reported by the configured RPC, if it is an allowed network.
+pub async fn network_passphrase(state: &AppState) -> Result<String, RelayError> {
+    let net = state.rpc("getNetwork").await.map_err(|_| RelayError::Rpc)?;
+    let p = net["passphrase"].as_str().ok_or(RelayError::Rpc)?;
+    if allowed_network(p) {
+        Ok(p.to_owned())
+    } else {
+        Err(RelayError::NotTestnet)
+    }
+}
 const BASE_FEE: u32 = 100_000;
 const MAX_TOTAL_FEE: u32 = 20_000_000; // 2 XLM hard ceiling per relayed tx
 
@@ -77,7 +101,7 @@ pub fn rp_id_hash(rp_id: &str) -> [u8; 32] {
     Sha256::digest(rp_id.as_bytes()).into()
 }
 
-fn contract_hash(contract: &str) -> Option<[u8; 32]> {
+pub fn contract_hash(contract: &str) -> Option<[u8; 32]> {
     stellar_strkey::Contract::from_string(contract)
         .ok()
         .map(|c| c.0)
@@ -128,7 +152,7 @@ pub fn create_account_tx(
 /// Applies a successful `simulateTransaction` result: resources footprint,
 /// resource fee and (empty) auth. Refuses simulations that require any
 /// authorization, because factory creation must be permissionless.
-pub fn assemble(mut tx: Transaction, sim: &Value) -> Result<Transaction, RelayError> {
+fn simulated_resources(sim: &Value) -> Result<(SorobanTransactionData, u32), RelayError> {
     if sim.get("error").is_some_and(|e| !e.is_null()) {
         return Err(RelayError::Simulation);
     }
@@ -143,13 +167,14 @@ pub fn assemble(mut tx: Transaction, sim: &Value) -> Result<Transaction, RelayEr
         .as_str()
         .and_then(|s| s.parse().ok())
         .ok_or(RelayError::Simulation)?;
-    let auth = sim["results"][0]["auth"]
-        .as_array()
-        .map(Vec::len)
-        .unwrap_or(0);
-    if auth != 0 {
-        return Err(RelayError::Rejected);
-    }
+    Ok((data, resource_fee))
+}
+
+fn apply_resources(
+    mut tx: Transaction,
+    data: SorobanTransactionData,
+    resource_fee: u32,
+) -> Result<Transaction, RelayError> {
     // 15% headroom over the simulated resource fee, capped.
     let total = BASE_FEE
         .checked_add(resource_fee.saturating_add(resource_fee / 100 * 15))
@@ -160,6 +185,27 @@ pub fn assemble(mut tx: Transaction, sim: &Value) -> Result<Transaction, RelayEr
     tx.fee = total;
     tx.ext = TransactionExt::V1(data);
     Ok(tx)
+}
+
+/// Applies a successful recording-mode simulation for an operation that must
+/// need NO authorization (e.g. permissionless factory creation).
+pub fn assemble(tx: Transaction, sim: &Value) -> Result<Transaction, RelayError> {
+    let (data, fee) = simulated_resources(sim)?;
+    let auth = sim["results"][0]["auth"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or(0);
+    if auth != 0 {
+        return Err(RelayError::Rejected);
+    }
+    apply_resources(tx, data, fee)
+}
+
+/// Applies an enforcing-mode simulation of a transaction that already carries
+/// its signed authorization entries.
+pub fn assemble_signed(tx: Transaction, sim: &Value) -> Result<Transaction, RelayError> {
+    let (data, fee) = simulated_resources(sim)?;
+    apply_resources(tx, data, fee)
 }
 
 pub fn sign(tx: Transaction, passphrase: &str, key: &SigningKey) -> TransactionEnvelope {
@@ -190,7 +236,7 @@ pub fn transaction_hash(tx: &Transaction, passphrase: &str) -> String {
     hex::encode(Sha256::digest(payload.to_xdr(Limits::none()).unwrap()))
 }
 
-fn b64(bytes: &[u8]) -> String {
+pub fn b64(bytes: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
@@ -219,7 +265,10 @@ pub fn returned_contract(retval_b64: &str) -> Option<String> {
     }
 }
 
-async fn relayer_sequence(state: &AppState, relayer: [u8; 32]) -> Result<i64, RelayError> {
+pub(crate) async fn relayer_sequence(
+    state: &AppState,
+    relayer: [u8; 32],
+) -> Result<i64, RelayError> {
     let key = LedgerKey::Account(LedgerKeyAccount {
         account_id: AccountId(PublicKey::PublicKeyTypeEd25519(Uint256(relayer))),
     });
@@ -287,10 +336,7 @@ pub async fn submit_account(
     rp_hash: [u8; 32],
     guardian: Option<&SignerKey>,
 ) -> Result<Submitted, RelayError> {
-    let net = state.rpc("getNetwork").await.map_err(|_| RelayError::Rpc)?;
-    if net["passphrase"].as_str() != Some(TESTNET_PASSPHRASE) {
-        return Err(RelayError::NotTestnet);
-    }
+    let passphrase = network_passphrase(state).await?;
     let relayer = key.verifying_key().to_bytes();
     let seq = relayer_sequence(state, relayer).await?;
     let tx = create_account_tx(relayer, seq + 1, factory, owner, rp_hash, guardian)
@@ -311,8 +357,8 @@ pub async fn submit_account(
         .and_then(returned_contract)
         .ok_or(RelayError::Simulation)?;
     let ready = assemble(tx, &sim)?;
-    let hash = transaction_hash(&ready, TESTNET_PASSPHRASE);
-    let envelope = sign(ready, TESTNET_PASSPHRASE, key);
+    let hash = transaction_hash(&ready, &passphrase);
+    let envelope = sign(ready, &passphrase, key);
     let sent = state
         .rpc_with_params(
             "sendTransaction",
