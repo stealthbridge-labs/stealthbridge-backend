@@ -1115,6 +1115,19 @@ mod tests {
     }
 
     #[test]
+    fn testnet_usdc_sac_id_matches_horizon() {
+        // Horizon (2026-11-25) reports contract_id CBIELTK6... for USDC issued by
+        // GBBD47IF... (home_domain centre.io); the derivation must agree.
+        let usdc = PayAsset::parse("USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5")
+            .unwrap();
+        let id = usdc.contract_id(relayer::TESTNET_PASSPHRASE).unwrap();
+        assert_eq!(
+            stellar_strkey::Contract(id).to_string().as_str(),
+            "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA"
+        );
+    }
+
+    #[test]
     fn parses_and_rejects_assets() {
         assert!(
             PayAsset::parse("USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5")
