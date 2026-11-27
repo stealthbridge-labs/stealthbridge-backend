@@ -58,6 +58,33 @@ pub const ACCOUNT_WASM_V080: &str =
 /// The WebAuthn verifier every smart-account-kit passkey signer uses on Testnet.
 pub const TESTNET_WEBAUTHN_VERIFIER: &str =
     "CC7EKIHQP3TN4CARQDND6CEOY2UXLWWC2X5GHTD5NLAT7BG5GPZIOM3F";
+/// Shielded pools the relay may sponsor (canonical lock: stealthbridge-contracts
+/// integrations/privacy-dependency-lock.v2.json; NethermindEth/stellar-private-payments
+/// @25f64658, a Testnet research integration that is NO_GO for value). Each entry is
+/// (pool, its token's Stellar Asset Contract, the pool WASM reproduced from source).
+pub const TESTNET_POOLS: [(&str, &str, &str); 4] = [
+    (
+        "CCW3LL6DAYESXPLCI5XVHYAM2I6XOW7PUAZLXDH4UAVETQN332B5XIHL",
+        "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+        "830977a55b6e28ba8388fde5e4ffaa67dba6bbaca5e9d4cd94c2f644bb4c41fb",
+    ),
+    (
+        "CAJAMQMMM5CMRY6OOHFAZSDN2UXX5ACXGF2VANERZLXWTUMCDICYW6TO",
+        "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+        "0b03494796e66c2df3e731a0bfa34c62194d91ef95e409f6d7ba694abe081165",
+    ),
+    (
+        "CAP74XRK6XWUYL2BTVWHUBUPOB5UHXFDRNK6LAFP42RRC7EWYORFSFZH",
+        "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+        "0b03494796e66c2df3e731a0bfa34c62194d91ef95e409f6d7ba694abe081165",
+    ),
+    (
+        "CBQNV6RSE42CUKGWYCPPWKALTKCQJFDJKGAFYCICZJ7DO6JMCUCZRYWX",
+        "CCUUDM434BMZMYWYDITHFXHDMIVTGGD6T2I5UKNX5BSLXLW7HVR4MCGZ",
+        "830977a55b6e28ba8388fde5e4ffaa67dba6bbaca5e9d4cd94c2f644bb4c41fb",
+    ),
+];
+
 /// Wallet self-calls the reference proxy sponsors (account management + execute).
 pub const WALLET_FUNCTIONS: [&str; 11] = [
     "execute",
@@ -90,6 +117,17 @@ pub struct Policy {
     pub deploy_wasm: Vec<[u8; 32]>,
     pub deployers: Vec<[u8; 32]>,
     pub verifiers: Vec<[u8; 32]>,
+    pub pools: Vec<PoolRule>,
+}
+
+/// A shielded pool the relay may sponsor `transact` on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PoolRule {
+    pub pool: [u8; 32],
+    /// The pool's own token (Stellar Asset Contract): the only token a deposit may move.
+    pub token: [u8; 32],
+    /// The pool code the instance must run (read from the ledger before sponsoring).
+    pub wasm: [u8; 32],
 }
 
 fn hex32(s: &str) -> Option<[u8; 32]> {
@@ -111,6 +149,14 @@ impl Policy {
             deploy_wasm: wasm,
             deployers: vec![shared_deployer()],
             verifiers: vec![contract_bytes(TESTNET_WEBAUTHN_VERIFIER).expect("pinned verifier")],
+            pools: TESTNET_POOLS
+                .iter()
+                .map(|(pool, token, wasm)| PoolRule {
+                    pool: contract_bytes(pool).expect("pinned pool"),
+                    token: contract_bytes(token).expect("pinned pool token"),
+                    wasm: hex32(wasm).expect("pinned pool wasm"),
+                })
+                .collect(),
         }
     }
 }
@@ -133,6 +179,8 @@ pub struct Plan {
     pub wallets: Vec<[u8; 32]>,
     /// Contracts whose instance must be a Stellar Asset Contract.
     pub tokens: Vec<[u8; 32]>,
+    /// Contracts whose instance must run exactly this WASM: (contract, wasm hash).
+    pub code: Vec<([u8; 32], [u8; 32])>,
 }
 
 /// A plain contract address. CAP-84 muxed contracts and every other arm fail.
@@ -266,7 +314,11 @@ pub fn classify(
                 kind: "deploy",
                 wallets: vec![],
                 tokens: vec![],
+                code: vec![],
             })
+        }
+        HostFunction::InvokeContract(call) if sym_fn(call) == Some("transact") => {
+            classify_pool_transact(call, auth, p)
         }
         HostFunction::InvokeContract(call) if sym_fn(call) == Some("transfer") => {
             let [entry] = auth else {
@@ -289,6 +341,7 @@ pub fn classify(
                 kind: "transfer",
                 wallets: vec![from],
                 tokens: vec![token],
+                code: vec![],
             })
         }
         HostFunction::InvokeContract(call) => {
@@ -312,10 +365,88 @@ pub fn classify(
                 kind: "wallet",
                 wallets: vec![wallet],
                 tokens: vec![],
+                code: vec![],
             })
         }
         _ => Err(Reject::Forbidden("HOST_FUNCTION_NOT_ALLOWED")),
     }
+}
+
+/// `ext_amount` (I256) from a pool `ExtData` value, if it fits an i128.
+fn ext_amount_of(ext_data: &ScVal) -> Option<i128> {
+    let ScVal::Map(Some(map)) = ext_data else {
+        return None;
+    };
+    let entry = map.0.iter().find(|e| sym(&e.key) == Some("ext_amount"))?;
+    let ScVal::I256(parts) = &entry.val else {
+        return None;
+    };
+    let low = ((u128::from(parts.lo_hi)) << 64) | u128::from(parts.lo_lo);
+    match (parts.hi_hi, parts.hi_lo) {
+        (0, 0) if low <= i128::MAX as u128 => Some(low as i128),
+        (-1, u64::MAX) if low > i128::MAX as u128 => Some(low as i128),
+        _ => None,
+    }
+}
+
+/// Shielded-pool `transact` from an OpenZeppelin wallet: exactly the tree the
+/// pool demands (evidence: stealthbridge-contracts integrations/evidence/
+/// oz-passkey-pool-authorization.v1.json). A deposit carries one nested
+/// `transfer(wallet -> pool, ext_amount)` on the pool's own token; a shielded
+/// transfer or withdrawal carries none. Proof validity is left to simulation.
+fn classify_pool_transact(
+    call: &InvokeContractArgs,
+    auth: &[SorobanAuthorizationEntry],
+    p: &Policy,
+) -> Result<Plan, Reject> {
+    let pool = contract_of(&call.contract_address).ok_or(Reject::Forbidden("POOL_NOT_ALLOWED"))?;
+    let rule = p
+        .pools
+        .iter()
+        .find(|r| r.pool == pool)
+        .ok_or(Reject::Forbidden("POOL_NOT_ALLOWED"))?;
+    let [_proof, ext_data, ScVal::Address(sender)] = call.args.as_slice() else {
+        return Err(Reject::Forbidden("POOL_ARGS"));
+    };
+    let wallet = contract_of(sender).ok_or(Reject::Forbidden("POOL_SENDER_NOT_WALLET"))?;
+    let [entry] = auth else {
+        return Err(Reject::Forbidden("POOL_AUTH_COUNT"));
+    };
+    let root = &entry.root_invocation;
+    let same =
+        matches!(&root.function, SorobanAuthorizedFunction::ContractFn(a) if xdr_eq(a, call));
+    if credential_address(entry).and_then(contract_of) != Some(wallet) || !same {
+        return Err(Reject::Forbidden("POOL_AUTH_MISMATCH"));
+    }
+    let amount = ext_amount_of(ext_data).ok_or(Reject::Forbidden("POOL_EXT_AMOUNT"))?;
+    if amount > 0 {
+        let [sub] = root.sub_invocations.as_slice() else {
+            return Err(Reject::Forbidden("POOL_DEPOSIT_TRANSFER"));
+        };
+        let ok = match &sub.function {
+            SorobanAuthorizedFunction::ContractFn(t) => {
+                contract_of(&t.contract_address) == Some(rule.token)
+                    && sym_fn(t) == Some("transfer")
+                    && sub.sub_invocations.is_empty()
+                    && matches!(t.args.as_slice(), [ScVal::Address(from), ScVal::Address(to), ScVal::I128(v)]
+                        if contract_of(from) == Some(wallet)
+                            && contract_of(to) == Some(pool)
+                            && ((i128::from(v.hi) << 64) | i128::from(v.lo)) == amount)
+            }
+            _ => false,
+        };
+        if !ok {
+            return Err(Reject::Forbidden("POOL_DEPOSIT_TRANSFER"));
+        }
+    } else if !root.sub_invocations.is_empty() {
+        return Err(Reject::Forbidden("POOL_UNEXPECTED_SUBCALL"));
+    }
+    Ok(Plan {
+        kind: "pool",
+        wallets: vec![wallet],
+        tokens: vec![rule.token],
+        code: vec![(pool, rule.wasm)],
+    })
 }
 
 fn sym_fn(call: &InvokeContractArgs) -> Option<&str> {
@@ -371,6 +502,13 @@ async fn confirm_on_chain(
         match executable(state, *t).await {
             Ok(Some(ContractExecutable::StellarAsset)) => {}
             Ok(_) => return Err(("TOKEN_NOT_ALLOWED", StatusCode::FORBIDDEN)),
+            Err(_) => return Err(("NETWORK_UNAVAILABLE", StatusCode::SERVICE_UNAVAILABLE)),
+        }
+    }
+    for (contract, wasm) in &plan.code {
+        match executable(state, *contract).await {
+            Ok(Some(ContractExecutable::Wasm(Hash(h)))) if &h == wasm => {}
+            Ok(_) => return Err(("POOL_CODE_CHANGED", StatusCode::FORBIDDEN)),
             Err(_) => return Err(("NETWORK_UNAVAILABLE", StatusCode::SERVICE_UNAVAILABLE)),
         }
     }
@@ -609,6 +747,7 @@ mod tests {
             deploy_wasm: vec![[0xAA; 32]],
             deployers: vec![shared_deployer()],
             verifiers: vec![[0x77; 32]],
+            pools: vec![],
         }
     }
     fn entry(addr: ScAddress, f: SorobanAuthorizedFunction, v2: bool) -> SorobanAuthorizationEntry {
@@ -767,7 +906,8 @@ mod tests {
                 Plan {
                     kind: "transfer",
                     wallets: vec![[0x44; 32]],
-                    tokens: vec![[0x33; 32]]
+                    tokens: vec![[0x33; 32]],
+                    code: vec![]
                 }
             );
         }
@@ -932,5 +1072,188 @@ mod tests {
         let p = Policy::testnet();
         assert_eq!(hex::encode(p.account_wasm[0]), ACCOUNT_WASM_V080);
         assert_eq!(p.verifiers.len(), 1);
+    }
+
+    fn pool_policy() -> Policy {
+        let mut p = policy();
+        p.pools = vec![PoolRule {
+            pool: [0x50; 32],
+            token: [0x33; 32],
+            wasm: [0x99; 32],
+        }];
+        p
+    }
+    fn ext_data(amount: i128) -> ScVal {
+        let v = amount as u128;
+        let neg = amount < 0;
+        let parts = stellar_xdr::Int256Parts {
+            hi_hi: if neg { -1 } else { 0 },
+            hi_lo: if neg { u64::MAX } else { 0 },
+            lo_hi: (v >> 64) as u64,
+            lo_lo: v as u64,
+        };
+        let entries = vec![
+            stellar_xdr::ScMapEntry {
+                key: symv("encrypted_output0"),
+                val: ScVal::Bytes(ScBytes(BytesM::default())),
+            },
+            stellar_xdr::ScMapEntry {
+                key: symv("ext_amount"),
+                val: ScVal::I256(parts),
+            },
+            stellar_xdr::ScMapEntry {
+                key: symv("recipient"),
+                val: ScVal::Address(c(0x77)),
+            },
+        ];
+        ScVal::Map(Some(ScMap(entries.try_into().unwrap())))
+    }
+    fn transact_call(pool: u8, sender: ScAddress, amount: i128) -> InvokeContractArgs {
+        InvokeContractArgs {
+            contract_address: c(pool),
+            function_name: ScSymbol(StringM::try_from("transact").unwrap()),
+            args: vec![ScVal::Void, ext_data(amount), ScVal::Address(sender)]
+                .try_into()
+                .unwrap(),
+        }
+    }
+    fn sac_transfer(
+        token: u8,
+        from: ScAddress,
+        to: u8,
+        amount: i128,
+    ) -> SorobanAuthorizedInvocation {
+        SorobanAuthorizedInvocation {
+            function: SorobanAuthorizedFunction::ContractFn(InvokeContractArgs {
+                contract_address: c(token),
+                function_name: ScSymbol(StringM::try_from("transfer").unwrap()),
+                args: vec![
+                    ScVal::Address(from),
+                    ScVal::Address(c(to)),
+                    ScVal::I128(stellar_xdr::Int128Parts {
+                        hi: (amount >> 64) as i64,
+                        lo: amount as u64,
+                    }),
+                ]
+                .try_into()
+                .unwrap(),
+            }),
+            sub_invocations: VecM::default(),
+        }
+    }
+    fn pool_entry(
+        call: &InvokeContractArgs,
+        signer: ScAddress,
+        subs: std::vec::Vec<SorobanAuthorizedInvocation>,
+    ) -> SorobanAuthorizationEntry {
+        let mut e = entry(
+            signer,
+            SorobanAuthorizedFunction::ContractFn(call.clone()),
+            false,
+        );
+        e.root_invocation.sub_invocations = subs.try_into().unwrap();
+        e
+    }
+
+    #[test]
+    fn pool_deposit_with_the_exact_tree_is_sponsorable() {
+        let call = transact_call(0x50, c(0x44), 13);
+        let e = pool_entry(&call, c(0x44), vec![sac_transfer(0x33, c(0x44), 0x50, 13)]);
+        let plan = classify(&HostFunction::InvokeContract(call), &[e], &pool_policy()).unwrap();
+        assert_eq!(
+            plan,
+            Plan {
+                kind: "pool",
+                wallets: vec![[0x44; 32]],
+                tokens: vec![[0x33; 32]],
+                code: vec![([0x50; 32], [0x99; 32])]
+            }
+        );
+    }
+
+    #[test]
+    fn pool_transfer_or_withdrawal_carries_no_nested_calls() {
+        for amount in [0i128, -13] {
+            let call = transact_call(0x50, c(0x44), amount);
+            let ok = pool_entry(&call, c(0x44), vec![]);
+            assert!(classify(
+                &HostFunction::InvokeContract(call.clone()),
+                &[ok],
+                &pool_policy()
+            )
+            .is_ok());
+            let extra = pool_entry(&call, c(0x44), vec![sac_transfer(0x33, c(0x44), 0x50, 13)]);
+            assert_eq!(
+                classify(
+                    &HostFunction::InvokeContract(call),
+                    &[extra],
+                    &pool_policy()
+                ),
+                Err(Reject::Forbidden("POOL_UNEXPECTED_SUBCALL"))
+            );
+        }
+    }
+
+    #[test]
+    fn pool_refusals() {
+        let p = pool_policy();
+        let check = |call: InvokeContractArgs, e: SorobanAuthorizationEntry| {
+            classify(&HostFunction::InvokeContract(call), &[e], &p)
+        };
+        // Unknown pool.
+        let call = transact_call(0x51, c(0x44), 13);
+        assert_eq!(
+            check(
+                call.clone(),
+                pool_entry(&call, c(0x44), vec![sac_transfer(0x33, c(0x44), 0x51, 13)])
+            ),
+            Err(Reject::Forbidden("POOL_NOT_ALLOWED"))
+        );
+        let call = transact_call(0x50, c(0x44), 13);
+        // Another wallet signs.
+        assert_eq!(
+            check(
+                call.clone(),
+                pool_entry(&call, c(0x45), vec![sac_transfer(0x33, c(0x44), 0x50, 13)])
+            ),
+            Err(Reject::Forbidden("POOL_AUTH_MISMATCH"))
+        );
+        // Another token, another amount, another destination, or no transfer at all.
+        for sub in [
+            vec![sac_transfer(0x34, c(0x44), 0x50, 13)],
+            vec![sac_transfer(0x33, c(0x44), 0x50, 14)],
+            vec![sac_transfer(0x33, c(0x44), 0x60, 13)],
+            vec![],
+        ] {
+            assert_eq!(
+                check(call.clone(), pool_entry(&call, c(0x44), sub)),
+                Err(Reject::Forbidden("POOL_DEPOSIT_TRANSFER"))
+            );
+        }
+        // A G account sender is not a sponsored wallet.
+        let call = transact_call(0x50, g([5; 32]), 13);
+        assert_eq!(
+            check(call.clone(), pool_entry(&call, g([5; 32]), vec![])),
+            Err(Reject::Forbidden("POOL_SENDER_NOT_WALLET"))
+        );
+        // ext_data without a parsable ext_amount.
+        let mut call = transact_call(0x50, c(0x44), 13);
+        call.args = vec![ScVal::Void, ScVal::Void, ScVal::Address(c(0x44))]
+            .try_into()
+            .unwrap();
+        assert_eq!(
+            check(call.clone(), pool_entry(&call, c(0x44), vec![])),
+            Err(Reject::Forbidden("POOL_EXT_AMOUNT"))
+        );
+    }
+
+    #[test]
+    fn pinned_pools_match_the_canonical_lock() {
+        let p = Policy::testnet();
+        assert_eq!(p.pools.len(), 4);
+        assert_eq!(
+            hex::encode(p.pools[0].wasm),
+            "830977a55b6e28ba8388fde5e4ffaa67dba6bbaca5e9d4cd94c2f644bb4c41fb"
+        );
     }
 }
