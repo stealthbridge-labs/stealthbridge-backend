@@ -2213,6 +2213,11 @@ pub fn router(state: AppState) -> Router {
                 .layer(axum::extract::DefaultBodyLimit::max(8192)),
         )
         .route(
+            crate::oz_relay::PATH,
+            axum::routing::post(crate::oz_relay::relay)
+                .layer(axum::extract::DefaultBodyLimit::max(131_072)),
+        )
+        .route(
             "/internal/payments/reconcile",
             get(crate::smart_account_payments::reconcile_job),
         )

@@ -32,6 +32,7 @@ pub mod webhook;
 
 pub mod account_beneficiaries;
 pub mod account_operations;
+pub mod oz_relay;
 pub mod payment_instructions;
 pub mod protocol_contracts;
 pub mod relayer;
